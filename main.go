@@ -3,10 +3,13 @@ package main
 import (
 	"database/sql"
 	"flag"
+	"fmt"
 	"log"
 	"regexp"
 	"strconv"
+	"strings"
 
+	"github.com/fatih/color"
 	_ "github.com/go-sql-driver/mysql"
 	"gopkg.in/cheggaaa/pb.v1"
 )
@@ -125,7 +128,7 @@ func main() {
 		"where table_name='" + table + "'" +
 		"and`INDEX_NAME`='PRIMARY'" +
 		"and`INDEX_SCHEMA`='" + schema + "'")
-	var newPrimaryKeys, newPrimaryKeysDesc, oldPrimaryKeys, oldOldPrimaryKeys string
+	var newPrimaryKeys, newHexPrimaryKeys, newPrimaryKeysDesc, oldPrimaryKeys, oldOldPrimaryKeys string
 	i = 0
 	for primaryKeysData.Next() {
 		err = primaryKeysData.Scan(&c)
@@ -134,47 +137,36 @@ func main() {
 		}
 		if i != 0 {
 			newPrimaryKeys += ","
+			newHexPrimaryKeys += ","
 			newPrimaryKeysDesc += ","
 			oldPrimaryKeys += ","
 			oldOldPrimaryKeys += ","
 		}
 		newPrimaryKeys += "`" + columns[c] + "`"
+		newHexPrimaryKeys += "hex(`" + columns[c] + "`)"
 		newPrimaryKeysDesc += "`" + columns[c] + "`desc"
 		oldPrimaryKeys += "`" + c + "`"
 		oldOldPrimaryKeys += "old.`" + c + "`"
+
 		i++
 	}
+	primaryKeys := make([]interface{}, i)
+	primaryKeyPtrs := make([]interface{}, i)
+	for i := range primaryKeys {
+		primaryKeyPtrs[i] = &primaryKeys[i]
+	}
 
-	// log.Println("Getting auto increment columns")
-	// autoIncrementData, err := db.Query("select`COLUMN_NAME`" +
-	// 	"from`INFORMATION_SCHEMA`.`COLUMNS`" +
-	// 	"where`TABLE_NAME`='" + table + "'" +
-	// 	"and`TABLE_SCHEMA`='" + schema + "'" +
-	// 	"and`COLUMN_DEFAULT`is null" +
-	// 	"and`IS_NULLABLE`='no'" +
-	// 	"and`EXTRA`like'%auto_increment%';")
-	// if err != nil {
-	// 	log.Fatal("Failed to get auto increment columns:", err)
-	// }
-	// autoIncrement := make([]string, 0)
-	// for autoIncrementData.Next() {
-	// 	err = autoIncrementData.Scan(&c)
-	// 	if err != nil {
-	// 		log.Fatal("Failed to scan auto increment columns:", err)
-	// 	}
-	// 	autoIncrement = append(autoIncrement, c)
-	// }
+	parseConstraintsRegex := regexp.MustCompile("(?i),\\s*(constraint\\s*`?[^`]+`?\\s*foreign\\s+key\\s*\\([^)]+\\)\\s*references\\s?`?[^`]+`?\\s*\\([^)]+\\)\\s*[a-z ]*)")
+	constraints := parseConstraintsRegex.FindAllStringSubmatch(create, -1)
+	create = parseConstraintsRegex.ReplaceAllString(create, "")
 
-	// parseKeysRegex := regexp.MustCompile("(?i),\\s*((?:(?:unique|fulltext)\\s+)?key\\s*`?[^`]+`?\\s*\\([^)]+\\))")
-	// keys := parseKeysRegex.FindAllStringSubmatch(create, -1)
-	// create = parseKeysRegex.ReplaceAllString(create, "")
-
-	// parseConstraintsRegex := regexp.MustCompile("(?i),\\s*(constraint\\s*`?[^`]+`?\\s*foreign\\s+key\\s*\\([^)]+\\)\\s*references\\s?`?[^`]+`?\\s*\\([^)]+\\)\\s*[a-z ]*)")
-	// constraints := parseConstraintsRegex.FindAllStringSubmatch(create, -1)
-	// create = parseConstraintsRegex.ReplaceAllString(create, "")
-
-	// parseAutoIncrement := regexp.MustCompile("(?i)(?<=\\(|,)\\s*(`[^`]+`[^,]+auto_increment)\\s*(?:\\)|,)")
-	// autoIncrement := parseAutoIncrement.
+	restoreConstraints := "alter table" + tableQ
+	for i, c := range constraints {
+		if i != 0 {
+			restoreConstraints += ","
+		}
+		restoreConstraints += "add " + c[1]
+	}
 
 	newTable := *prefixPtr + table
 	newTableQ := "`" + newTable + "`"
@@ -184,14 +176,56 @@ func main() {
 		log.Fatal("Failed to remove table:", err)
 	}
 
+	newInsertsTable := *prefixPtr + "inserts_" + table
+	newInsertsTableQ := "`" + newInsertsTable + "`"
+	log.Println("Dropping table", newInsertsTableQ, "(if exists)")
+	_, err = db.Exec("drop table if exists" + newInsertsTableQ)
+	if err != nil {
+		log.Fatal("Failed to remove table:", err)
+	}
+
 	createTableRegex := regexp.MustCompile("(?i)create\\s+table\\s*`?[^`]+`?")
 	create = createTableRegex.ReplaceAllString(create, "create table`"+newTable+"`")
 
-	// create = regexp.MustCompile("(?i)auto_increment").ReplaceAllString(create, "")
-	create = regexp.MustCompile("(?i)constraint `").ReplaceAllString(create, "constraint `"+*prefixPtr)
+	log.Println("Getting triggers")
+	triggersData, err := db.Query("select`TRIGGER_NAME`" +
+		"from`information_schema`.`triggers`" +
+		"where`EVENT_OBJECT_TABLE`='" + table + "'" +
+		"and`TRIGGER_NAME`not like'" + *prefixPtr + "%'" +
+		"and`EVENT_OBJECT_SCHEMA`='" + schema + "';")
+	if err != nil {
+		log.Fatal("Failed to get triggers:", err)
+	}
+	triggers := make([]string, 0)
+	var t string
+	for triggersData.Next() {
+		err = triggersData.Scan(&t)
+		if err != nil {
+			log.Fatal("Failed to scan trigger:", err)
+		}
+		triggers = append(triggers, t)
+	}
+	createTriggersRegex := regexp.MustCompile("(?i)\\s+on\\s*`" + regexp.QuoteMeta(table) + "`")
+	createTriggers := make([]string, len(triggers))
+	for i, t := range triggers {
+		createTriggersData, err := db.Query("show create trigger`" + t + "`;")
+		if err != nil {
+			log.Fatal("Failed to get trigger:", err)
+		}
+		for createTriggersData.Next() {
+			err = createTriggersData.Scan(&x, &x, &t, &x, &x, &x, &x)
+			if err != nil {
+				log.Fatal("Failed to scan trigger:", err)
+			}
+			createTriggers[i] = strings.Replace(t, createTriggersRegex.FindString(t), " on"+newTableQ, 1)
+		}
+	}
 
 	log.Println("Disabling foreign keys, unique keys")
 	_, err = db.Exec("set foreign_key_checks=0;set unique_checks=0;")
+	if err != nil {
+		log.Fatal("Failed to disable:", err)
+	}
 
 	log.Println("Creating new table", newTableQ)
 	_, err = db.Exec(create)
@@ -203,6 +237,12 @@ func main() {
 	_, err = db.Exec("alter table" + newTableQ + alter)
 	if err != nil {
 		log.Fatal("Failed to alter new table:", err)
+	}
+
+	log.Println("Creating new table", newInsertsTableQ)
+	_, err = db.Exec("create table" + newInsertsTableQ + "like" + newTableQ)
+	if err != nil {
+		log.Fatal("Failed to create new table:", err)
 	}
 
 	insertTriggerQ := "`" + *prefixPtr + table + "_AFTER_INSERT`"
@@ -230,7 +270,7 @@ func main() {
 	log.Println("Adding", insertTriggerQ)
 	_, err = db.Exec("create trigger" + insertTriggerQ + "after insert on" + tableQ + "for each row " +
 		"begin " +
-		"insert into" + newTableQ + "(" + newColumns + ")values(" + oldNewColumns + ");" +
+		"insert into" + newInsertsTableQ + "(" + newColumns + ")values(" + oldNewColumns + ");" +
 		"end")
 	if err != nil {
 		log.Fatal("Failed to add trigger:", err)
@@ -240,6 +280,7 @@ func main() {
 	_, err = db.Exec("create trigger" + updateTriggerQ + "after update on" + tableQ + "for each row " +
 		"begin " +
 		"update" + newTableQ + "set" + updateColumns + "where(" + newPrimaryKeys + ")=(" + oldOldPrimaryKeys + ");" +
+		"update" + newInsertsTableQ + "set" + updateColumns + "where(" + newPrimaryKeys + ")=(" + oldOldPrimaryKeys + ");" +
 		"end")
 	if err != nil {
 		log.Fatal("Failed to add trigger:", err)
@@ -249,6 +290,7 @@ func main() {
 	_, err = db.Exec("create trigger" + deleteTriggerQ + "after delete on" + tableQ + "for each row " +
 		"begin " +
 		"delete from" + newTableQ + "where(" + newPrimaryKeys + ")=(" + oldOldPrimaryKeys + ");" +
+		"delete from" + newInsertsTableQ + "where(" + newPrimaryKeys + ")=(" + oldOldPrimaryKeys + ");" +
 		"end")
 	if err != nil {
 		log.Fatal("Failed to add trigger:", err)
@@ -269,15 +311,36 @@ func main() {
 
 	log.Println("Inserting data")
 	bar := pb.StartNew(count)
-	limit := 10240
+	limit := 2048
 	i = 0
 	for {
-		q := "insert into" + newTableQ + "(" + newColumns + ")select" + oldColumns + "from" + tableQ
+		q := "insert ignore into" + newTableQ + "(" + newColumns + ")select" + oldColumns + "from" + tableQ
 		if i != 0 {
-			q += "where(" + oldPrimaryKeys + ")>(select" + newPrimaryKeys + "from" + newTableQ + "order by" + newPrimaryKeysDesc + " limit 1)"
+			q += "where(" + oldPrimaryKeys + ")>("
+			maxData, err := db.Query("select" + newPrimaryKeys + "from" + newTableQ + "order by" + newPrimaryKeysDesc + " limit 1")
+			if err != nil {
+				log.Fatal("Failed to get max primary keys:", err)
+			}
+			for maxData.Next() {
+				err = maxData.Scan(primaryKeyPtrs...)
+				if err != nil {
+					log.Fatal("Failed to scan max primary keys:", err)
+				}
+			}
+			for i := range primaryKeys {
+				if i != 0 {
+					q += ","
+				}
+				q += "?"
+			}
+			q += ")"
 		}
 		q += "order by" + oldPrimaryKeys + "limit " + strconv.Itoa(limit)
-		_, err = db.Exec(q)
+		if i == 0 {
+			_, err = db.Exec(q)
+		} else {
+			_, err = db.Exec(q, primaryKeys...)
+		}
 		if err != nil {
 			log.Fatal("Failed to insert rows:", err)
 		}
@@ -303,12 +366,50 @@ func main() {
 		i += rowCount
 	}
 
+	// This definitely creates more downtime where the table just doesn't exist
+	// But it also creates the least room for potential problems, i.e. rows being added in between the
+	// copy from the inserts table and the dropping of the orders table. If it doesn't exist,
+	// then rows can't be inserted into it and get lost, and (hopefully) the application can
+	// retry it's failed insert/update/select once newTable is renamed
 	log.Println("Dropping old table")
 	_, err = db.Exec("drop table" + tableQ)
 	if err != nil {
 		log.Fatal("Failed to drop table:", err)
 	}
 
+	log.Println("Inserting from", newInsertsTableQ)
+	_, err = db.Exec("insert ignore into" + newTableQ + "select*from" + newInsertsTableQ)
+	if err != nil {
+		log.Fatal("Failed to clone data:", err)
+	}
+
 	log.Println("Restoring triggers")
+	for _, t := range createTriggers {
+		_, err = db.Exec(t)
+		if err != nil {
+			color.Set(color.FgYellow)
+			defer color.Unset()
+			log.Println("Failed to add trigger:", err)
+			fmt.Println(t)
+		}
+	}
+
+	log.Println("Renaming tables")
+	_, err = db.Exec("rename table" + newTableQ + "to" + tableQ)
+	if err != nil {
+		log.Fatal("Failed to rename table:", err)
+	}
+
+	log.Println("Restoring constraints")
+	_, err = db.Exec(restoreConstraints)
+	if err != nil {
+		log.Fatal("Failed to alter table:", err)
+	}
+
+	log.Println("Dropping table", newInsertsTableQ)
+	_, err = db.Exec("drop table" + newInsertsTableQ)
+	if err != nil {
+		log.Fatal("Failed to drop table:", err)
+	}
 
 }
