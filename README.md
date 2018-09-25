@@ -11,6 +11,19 @@ As a workaround for those issues, I've been copying the existing triggers for ta
 Another problem with that tool and almost all of the others is that they're quite complicated, which I why I think bugs in the Percona tool exist (like Binary columns being treated as the table's charset and throwing errors about values not being valid UTF8), but not this one.
 
 ---
+### Prerequisites
+
+This tool was written and tested with Go version 1.10.3, so I would recommend having at least that version when using this tool, otherwise you might experience some issues.
+
+Go's installing instructions can be found here https://golang.org/doc/install#install
+
+Once Go is installed, and you've added the go/bin folder to your path, you can install `smg-live-alter`.
+
+```
+go get github.com/StirlingMarketingGroup/smg-live-alter
+go install smg-live-alter
+smg-live-alter -help
+---
 
 ### Usage
 
