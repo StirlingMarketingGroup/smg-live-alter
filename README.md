@@ -14,6 +14,8 @@ Another problem with that tool and almost all of the others is that they're quit
 
 ### Usage
 
+![helpful screenshot](https://d159l1kvshziji.cloudfront.net/i/Fg-/A.jpg)
+
 ```
 ./smg-live-alter -help
   -P int
