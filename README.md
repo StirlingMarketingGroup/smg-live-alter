@@ -23,6 +23,8 @@ Once Go is installed, and you've added the go/bin folder to your path, you can i
 go get github.com/StirlingMarketingGroup/smg-live-alter
 go install smg-live-alter
 smg-live-alter -help
+```
+
 ---
 
 ### Usage
