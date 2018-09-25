@@ -20,8 +20,9 @@ Go's installing instructions can be found here https://golang.org/doc/install#in
 Once Go is installed, and you've added the go/bin folder to your path, you can install `smg-live-alter`.
 
 ```
+go version #verify >=1.10.3
 go get github.com/StirlingMarketingGroup/smg-live-alter
-go install smg-live-alter
+go install github.com/StirlingMarketingGroup/smg-live-alter
 smg-live-alter -help
 ```
 
