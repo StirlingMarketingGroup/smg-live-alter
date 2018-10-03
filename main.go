@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	_ "github.com/go-sql-driver/mysql"
@@ -309,9 +310,13 @@ func main() {
 		}
 	}
 
+	const target = time.Millisecond * 300
+	const min = 8
+	var elapsed time.Duration
+
 	log.Println("Inserting data")
 	bar := pb.StartNew(count)
-	limit := 2048
+	limit := 1024
 	i = 0
 	for {
 		q := "insert ignore into" + newTableQ + "(" + newColumns + ")select" + oldColumns + "from" + tableQ
@@ -336,6 +341,16 @@ func main() {
 			q += ")"
 		}
 		q += "order by" + oldPrimaryKeys + "limit " + strconv.Itoa(limit)
+
+		if elapsed != 0 {
+			limit = int(target.Seconds() / elapsed.Seconds() * float64(limit))
+		}
+
+		if limit < min {
+			limit = min
+		}
+
+		start := time.Now()
 		if i == 0 {
 			_, err = db.Exec(q)
 		} else {
@@ -344,6 +359,9 @@ func main() {
 		if err != nil {
 			log.Fatal("Failed to insert rows:", err)
 		}
+		elapsed = time.Since(start)
+		// fmt.Println(limit, elapsed, target.Seconds()/elapsed.Seconds(), target.Seconds()/elapsed.Seconds()*float64(limit))
+
 		rowCountData, err := db.Query("select row_count();")
 		if err != nil {
 			log.Fatal("Failed to get row count:", err)
