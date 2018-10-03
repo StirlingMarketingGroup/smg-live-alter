@@ -310,7 +310,7 @@ func main() {
 		}
 	}
 
-	const target = time.Millisecond * 300
+	const target = time.Millisecond * 200
 	const min = 8
 	var elapsed time.Duration
 
