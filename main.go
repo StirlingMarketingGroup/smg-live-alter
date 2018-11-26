@@ -4,7 +4,10 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -28,6 +31,29 @@ func main() {
 	prefixPtr := flag.String("prefix", "_SMGLA_", "the prefix of the new tmp table")
 
 	flag.Parse()
+
+	if len(*queryPtr) == 0 {
+		f, err := ioutil.TempFile("", "")
+		if err != nil {
+			log.Fatal("failed to open default text editor:", err)
+		}
+		f.Close()
+		cmd := exec.Command("nano", f.Name())
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err = cmd.Start()
+		if err != nil {
+			log.Fatal("failed to start editing command:", err)
+		}
+		err = cmd.Wait()
+		if err != nil {
+			log.Fatal("error while editing:", err)
+		}
+		b, err := ioutil.ReadFile(f.Name())
+		*queryPtr = strings.TrimSpace(string(b))
+		fmt.Println(*queryPtr)
+	}
 
 	db, err := sql.Open("mysql", *usernamePtr+":"+*passwordPtr+"@tcp("+*hostPtr+":"+strconv.Itoa(*portPtr)+")/"+*databasePtr+"?charset=utf8mb4&collation=utf8mb4_unicode_ci&multiStatements=true")
 	if err != nil {
