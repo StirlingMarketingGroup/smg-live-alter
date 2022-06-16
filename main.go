@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -33,7 +32,7 @@ func main() {
 	flag.Parse()
 
 	if len(*queryPtr) == 0 {
-		f, err := ioutil.TempFile("", "")
+		f, err := os.CreateTemp("", "")
 		if err != nil {
 			log.Fatal("failed to open default text editor:", err)
 		}
@@ -50,7 +49,10 @@ func main() {
 		if err != nil {
 			log.Fatal("error while editing:", err)
 		}
-		b, err := ioutil.ReadFile(f.Name())
+		b, err := os.ReadFile(f.Name())
+		if err != nil {
+			log.Fatal("failed to read file:", err)
+		}
 		*queryPtr = strings.TrimSpace(string(b))
 		fmt.Println(*queryPtr)
 	}
@@ -155,6 +157,10 @@ func main() {
 		"where table_name='" + table + "'" +
 		"and`INDEX_NAME`='PRIMARY'" +
 		"and`INDEX_SCHEMA`='" + schema + "'")
+	if err != nil {
+		log.Fatal("failed to select primary keys:", err)
+	}
+
 	var newPrimaryKeys, newHexPrimaryKeys, newPrimaryKeysDesc, oldPrimaryKeys, oldOldPrimaryKeys string
 	i = 0
 	for primaryKeysData.Next() {
@@ -422,7 +428,7 @@ func main() {
 	}
 
 	log.Println("Inserting from", newInsertsTableQ)
-	_, err = db.Exec("insert ignore into" + newTableQ + "select*from" + newInsertsTableQ)
+	_, err = db.Exec("insert ignore into" + newTableQ + "(" + newColumns + ")select" + newColumns + "from" + newInsertsTableQ)
 	if err != nil {
 		log.Fatal("Failed to clone data:", err)
 	}
