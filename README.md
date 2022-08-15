@@ -13,51 +13,39 @@ Another problem with that tool and almost all of the others is that they're quit
 ---
 ### Prerequisites
 
-This tool was written and tested with Go version 1.10.3, so I would recommend having at least that version when using this tool, otherwise you might experience some issues.
+This tool was written and tested with Go version 1.19, so I would recommend having at least that version when using this tool, otherwise you might experience some issues.
 
 Go's installing instructions can be found here https://golang.org/doc/install#install
 
 Once Go is installed, and you've added the go/bin folder to your path, you can install `smg-live-alter`.
 
 ```
-go version #verify >=1.10.3
-go get github.com/StirlingMarketingGroup/smg-live-alter
-go install github.com/StirlingMarketingGroup/smg-live-alter
+go version #verify >=1.19
+go install github.com/StirlingMarketingGroup/smg-live-alter@latest
 smg-live-alter -help
 ```
 
 ---
 
-### Usage
+## Usage
 
-![helpful screenshot](https://d159l1kvshziji.cloudfront.net/i/Fg-/A.jpg)
+```shell
+smg-live-alter [flags] 'user:pass@(host)/dbname'
+# or, with a connections file
+smg-live-alter [flags] localhost
+```
+### Flags:
 
-```
-./smg-live-alter -help
-  -P int
-        your MySQL port (default 3306)
-  -d string
-        your MySQL database
-  -h string
-        your MySQL host (default "localhost")
-  -p string
-        your MySQL password
-  -prefix string
-        the prefix of the new tmp table (default "_SMGLA_")
-  -q string
-        the alter table query to be executed
-  -u string
-        your MySQL username (default "root")
-```
+  - `-c` your connections file (default `~/.config/smg-live-alter/connections.yaml` on Linux, more info below)
+  - `-suffix` suffix of the temp table used for initial creation before the swap and drop (default `_smgla_`)
+  - `-r` value
+        max rows buffer size. Will have this many rows downloaded and ready for importing, or in Go terms, the channel size used to communicate the rows (default 50)
 
 As you can see, there's not a lot of options here. Yay simplicity!
 
 There’re two arguments I can see here that may need a tad explained, however:
 
-1. `-prefix` - This is simply the prefix that this tool uses on the temp tables it generates. This should be something that won't collide with other table names. Example: if you have two tables, one named `orders` (that's the one being altered) and another table named `placedorders`, then don't set your prefix to "placed" because it will drop `placeorders` thinking it's a left-over temp table from a previous run.
-
-2. `-q` - This is the alter statement. Paste it here in its entirety. an example would be something like this: "``ALTER TABLE `sterling`.`notifications` CHANGE COLUMN `Shown` `Shown` TINYINT(1) NOT NULL DEFAULT '0' ;``"
-<sub>Tip: Make sure you remove the newlines before pasting, or the returns in the pasted statement will try to execute the command.</sub>
+1. `-suffix` - This is simply the suffix that this tool uses on the temp tables it generates. This should be something that won't collide with other table names. Example: if you have two tables, one named `orders` (that's the one being altered) and another table named `ordersplace`, then don't set your suffix to "placed" because it will drop `ordersplace` thinking it's a left-over temp table from a previous run.
 
 The tool parses the table name and other things from the alter query, so there's no need to give that as a separate option (looking at you two, GitHub and Percona).
 
