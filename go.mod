@@ -2,8 +2,6 @@ module github.com/StirlingMarketingGroup/smg-live-alter
 
 go 1.19
 
-replace github.com/StirlingMarketingGroup/cool-mysql => ../go/src/github.com/StirlingMarketingGroup/cool-mysql
-
 require (
 	github.com/Ompluscator/dynamic-struct v1.3.0
 	github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20220815160518-b8a0a121dc5f
