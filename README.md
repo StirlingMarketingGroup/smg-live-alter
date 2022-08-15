@@ -21,7 +21,7 @@ Once Go is installed, and you've added the go/bin folder to your path, you can i
 
 ```
 go version #verify >=1.19
-go install github.com/StirlingMarketingGroup/smg-live-alter@latest
+go install github.com/StirlingMarketingGroup/smg-live-alter/v2@latest
 smg-live-alter -help
 ```
 
