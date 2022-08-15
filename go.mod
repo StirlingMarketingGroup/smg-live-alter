@@ -1,4 +1,4 @@
-module github.com/StirlingMarketingGroup/smg-live-alter
+module github.com/StirlingMarketingGroup/smg-live-alter/v2
 
 go 1.19
 
