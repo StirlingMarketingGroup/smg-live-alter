@@ -11,8 +11,8 @@ import (
 	cool "github.com/StirlingMarketingGroup/cool-mysql"
 	"github.com/fatih/color"
 	"github.com/posener/cmd"
-	"github.com/vbauerster/mpb/v5"
-	"github.com/vbauerster/mpb/v5/decor"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 )
 
 var confDir, _ = os.UserConfigDir()
@@ -81,8 +81,6 @@ func main() {
 
 	hr := strings.Repeat("+", 64)
 	log.Printf("using alter query:\n%s\n%s\n%s\n", hr, color.CyanString(alterQuery), hr)
-
-	pb := mpb.New()
 
 	// and get the count, so we can show our swick progress bars
 	log.Println("getting row count")
@@ -299,10 +297,12 @@ func main() {
 		}
 	}()
 
+	p := mpb.New()
+
 	// our pretty bar config for the progress bars
 	// their documentation lives over here https://github.com/vbauerster/mpb
-	bar := pb.AddBar(count.Count,
-		mpb.BarStyle("|▇▇ |"),
+	bar := p.New(count.Count,
+		mpb.BarStyle().Lbound("|").Filler("▇").Tip("▇").Padding(" ").Rbound("|"),
 		mpb.PrependDecorators(
 			decor.Name(color.HiBlueString(tableName)),
 			decor.OnComplete(decor.Percentage(decor.WC{W: 5}), color.HiMagentaString(" done!")),
@@ -339,6 +339,12 @@ func main() {
 	// and just in case the rows have changed count since our count selection,
 	// we'll just tell the progress bar that we're finished
 	bar.SetTotal(bar.Current(), true)
+
+	p.Wait()
+
+	if !yesNo("do the drop/swap?") {
+		os.Exit(0)
+	}
 
 	tx, cancel, err := db.BeginTx()
 	defer cancel()

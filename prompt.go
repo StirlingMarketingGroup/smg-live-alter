@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,4 +33,13 @@ func promptText() (string, error) {
 	}
 
 	return strings.TrimSpace(string(b)), nil
+}
+
+var reader = bufio.NewReader(os.Stdin)
+
+func yesNo(prompt string) bool {
+	fmt.Print(prompt, " Y/n: ")
+	yesNo, _ := reader.ReadString('\n')
+	yesNo = yesNo[:len(yesNo)-1]
+	return yesNo != "n"
 }
