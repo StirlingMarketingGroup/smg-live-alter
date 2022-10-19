@@ -26,9 +26,9 @@ func getTableColumns(db *cool.Database, tableName string) ([]*column, error) {
 	columnInfoCols := "`COLUMN_NAME`,`ORDINAL_POSITION`,`DATA_TYPE`,`COLUMN_TYPE`"
 	ok, err := db.Exists("select 0 "+
 		"from`information_schema`.`columns`"+
-		"where`TABLE_SCHEMA`='INFORMATION_SCHEMA'"+
-		"and`table_name`='columns'"+
-		"and`column_name`='GENERATION_EXPRESSION'", 0)
+		"where`TABLE_SCHEMA`in('INFORMATION_SCHEMA','information_schema')"+
+		"and`table_name`in('COLUMNS','columns')"+
+		"and`column_name`in('GENERATION_EXPRESSION','generation_expression')", 0)
 	if err != nil {
 		return nil, err
 	}

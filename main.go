@@ -204,6 +204,10 @@ func main() {
 
 	i = 0
 	for _, c := range newColumns {
+		if len(c.GenerationExpression) != 0 {
+			continue
+		}
+
 		if _, ok := newColumnsIntersect[c.ColumnName]; !ok {
 			continue
 		}

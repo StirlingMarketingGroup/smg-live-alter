@@ -71,7 +71,7 @@ func tableRowStruct(columns []*column) (dynamicstruct.Builder, error) {
 			// our cool mysql literal is exactly what it sounds like;
 			// passed directly into the query with no escaping, which is know is
 			// safe here because a decimal from mysql can't contain breaking characters
-			v = new(cool.Literal)
+			v = new(cool.RawMySQL)
 		case "timestamp", "date", "datetime":
 			v = new(string)
 		case "binary", "varbinary", "blob", "tinyblob", "mediumblob", "longblob":
