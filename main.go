@@ -29,6 +29,8 @@ var (
 
 	tempTableSuffix = root.String("suffix", "_smgla_", "suffix of the temp table used for initial creation before the swap and drop")
 
+	verbose = root.Bool("v", false, "writes the full query log to stdout")
+
 	args = root.Args("connection", "connection, ex:\n"+
 		"smg-live-alter [flags] 'user:pass@(host)/dbname'\n\n"+
 		"see: https://github.com/go-sql-driver/mysql#dsn-data-source-name\n\n"+
@@ -62,6 +64,12 @@ func main() {
 	db, err := cool.NewFromDSN(dbDSN, dbDSN)
 	if err != nil {
 		panic(err)
+	}
+
+	if *verbose {
+		db.Log = func(query string, params cool.Params, duration time.Duration, cacheHit bool) {
+			log.Println(query)
+		}
 	}
 
 	db.DisableUnusedColumnWarnings = true
@@ -272,28 +280,68 @@ func main() {
 		panic(err)
 	}
 
-	newRowStruct, err := tableRowStruct(newColumns)
+	newRowStruct, pkIndexes, err := tableRowStruct(newColumns)
 	if err != nil {
 		panic(err)
 	}
 
 	// this gets the "type" of our struct from our dynamic struct
-	structType := reflect.Indirect(reflect.ValueOf(newRowStruct.Build().New())).Type()
+	structType := reflect.ValueOf(newRowStruct.Build().New()).Elem().Type()
 	// and then we make a channel with reflection for our new type of struct
 	chRef := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, structType), *rowBufferSize)
 	ch := chRef.Interface()
 
-	// oh yeah, that's just one query. We don't actually have to chunk this selection
-	// because we're dealing with rows as they come in, instead of trying to select them
-	// all into memory or something first, which makes this code dramatically simpler
-	// and should work with tables of all sizes
+	prevIDs := make([]any, len(pkIndexes))
+
+	var exists bool
+	destFunc := reflect.MakeFunc(reflect.FuncOf([]reflect.Type{structType}, nil, false),
+		func(args []reflect.Value) (results []reflect.Value) {
+			chRef.Send(args[0])
+			exists = true
+
+			for i, field := range pkIndexes {
+				prevIDs[i] = args[0].Field(field).Interface()
+			}
+
+			return nil
+		})
+
 	go func() {
 		defer chRef.Close()
 
+		firstChunk := true
+
 		log.Println("selecting all the rows!")
-		err := db.Select(ch, "select /*+ MAX_EXECUTION_TIME(2147483647) */ "+selectColumns.String()+"from`"+tableName+"`", 0)
-		if err != nil {
-			panic(err)
+		for {
+			var where string
+			if !firstChunk {
+				where, _ = cool.InlineParams("where(@@pks)>(@@prevIDs)", cool.Params{
+					"pks":     cool.RawMySQL(quoteColumns(oldPrimaryColumns)),
+					"prevIDs": prevIDs,
+				})
+			}
+
+			exists = false
+			err := db.Select(destFunc.Interface(), "select /*+ MAX_EXECUTION_TIME(2147483647) */@@cols "+
+				"from @@table "+
+				"@@where "+
+				"order by @@pks "+
+				"limit @@limit ", 0, cool.Params{
+				"cols":  cool.RawMySQL(selectColumns.String()),
+				"table": cool.RawMySQL(fmt.Sprintf("`%s`", tableName)),
+				"where": cool.RawMySQL(where),
+				"pks":   cool.RawMySQL(quoteColumns(oldPrimaryColumns)),
+				"limit": *rowBufferSize,
+			})
+			if err != nil {
+				log.Fatalf("failed to execute main select: %v", err)
+			}
+
+			firstChunk = false
+
+			if !exists {
+				break
+			}
 		}
 	}()
 
@@ -317,6 +365,8 @@ func main() {
 	targetChunkTime := 500 * time.Millisecond
 	chunkStartTime := time.Now()
 
+	originalMaxInsertSize := db.MaxInsertSize.Get()
+
 	// start the import!
 	// Now this *does* have to be chunked because there's no way to stream
 	// rows to mysql, but cool mysql handles this for us, all it needs is the same
@@ -325,12 +375,24 @@ func main() {
 		chunkTime := time.Since(chunkStartTime)
 		if chunkTime > targetChunkTime {
 			db.MaxInsertSize.Set(int(float64(db.MaxInsertSize.Get()) * float64(targetChunkTime) / float64(chunkTime)))
-		}
+		} else {
+			current := db.MaxInsertSize.Get()
+			ratio := int(float64(db.MaxInsertSize.Get()) * float64(targetChunkTime) / float64(chunkTime))
 
+			addl := ratio - current
+			newMaxInsertSize := current + addl/10
+
+			if newMaxInsertSize <= originalMaxInsertSize {
+				// if the last chunk took too long, we drop the insert chunk size immediately,
+				// but if the chunk inserted faster than target time then increase the chunk size,
+				// but only by 10% of the difference, allowing for a steady increase
+				db.MaxInsertSize.Set(current + addl/10)
+			}
+		}
+		chunkStartTime = time.Now()
+	}).SetAfterRowExec(func(start time.Time) {
 		bar.Increment()
 		bar.DecoratorEwmaUpdate(time.Since(start))
-
-		chunkStartTime = time.Now()
 	}).Insert("insert ignore into`"+tempTableName+"`", ch)
 	if err != nil {
 		panic(err)
