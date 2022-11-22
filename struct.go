@@ -10,11 +10,12 @@ import (
 	cool "github.com/StirlingMarketingGroup/cool-mysql"
 )
 
-func tableRowStruct(columns []*column) (dynamicstruct.Builder, error) {
+func tableRowStruct(columns []*column) (bld dynamicstruct.Builder, pkIndexes []int, err error) {
 	// this is our dynamic struct of the actual row, which will have
 	// properties added to it for each column in the following loop
 	rowStruct := dynamicstruct.NewStruct()
 
+	i := 0
 	for _, c := range columns {
 		// you can't insert into generated columns, and mysql will actually
 		// throw errors if you try and do this, so we simply skip them altogether
@@ -71,7 +72,7 @@ func tableRowStruct(columns []*column) (dynamicstruct.Builder, error) {
 			// our cool mysql literal is exactly what it sounds like;
 			// passed directly into the query with no escaping, which is know is
 			// safe here because a decimal from mysql can't contain breaking characters
-			v = new(cool.Literal)
+			v = new(cool.RawMySQL)
 		case "timestamp", "date", "datetime":
 			v = new(string)
 		case "binary", "varbinary", "blob", "tinyblob", "mediumblob", "longblob":
@@ -87,11 +88,15 @@ func tableRowStruct(columns []*column) (dynamicstruct.Builder, error) {
 		case "set":
 			v = new(any)
 		default:
-			return nil, fmt.Errorf("unknown mysql column of type %q", c.ColumnType)
+			return nil, nil, fmt.Errorf("unknown mysql column of type %q", c.ColumnType)
 		}
 
 		rowStruct.AddField(f, v, tag)
+		if c.PrimaryKey {
+			pkIndexes = append(pkIndexes, i)
+		}
+		i++
 	}
 
-	return rowStruct, nil
+	return rowStruct, pkIndexes, nil
 }
