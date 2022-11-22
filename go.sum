@@ -1,9 +1,5 @@
 github.com/Ompluscator/dynamic-struct v1.3.0 h1:Ozvw+T2UOmV/2J2/L7tPZxrypKen3CGSBwmWj8pwC4Q=
 github.com/Ompluscator/dynamic-struct v1.3.0/go.mod h1:01g22H1GC9IFcrpQ4JQBkzynp8RoT0wmUMx/OvXNnw8=
-github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221118214506-bf5d8bd337de h1:vAmkjIR1eNMA2EQmA8/7PpjXqou0w9uc7zr6heejXeQ=
-github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221118214506-bf5d8bd337de/go.mod h1:R90FFhMAShSo8C2Fk9DN4/z6w0JWdDOXOWj7Tn1kcyU=
-github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221121171854-5788d2cc2879 h1:RJP2P+AOaAKRvksdQ1yOqmnmJxvBGjGDkjDK7lsLUlg=
-github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221121171854-5788d2cc2879/go.mod h1:R90FFhMAShSo8C2Fk9DN4/z6w0JWdDOXOWj7Tn1kcyU=
 github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221121180710-54cb9eaf018c h1:2PZt2AMS8XsmSAetlzYAujlhCdu4/dibWbnaaJ+ZWsw=
 github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221121180710-54cb9eaf018c/go.mod h1:R90FFhMAShSo8C2Fk9DN4/z6w0JWdDOXOWj7Tn1kcyU=
 github.com/VividCortex/ewma v1.2.0 h1:f58SaIzcDXrSy3kWaHNvuJgJ3Nmz59Zji6XoJR/q1ow=
@@ -23,8 +19,6 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/rVNCu3HqELle0jiPLLBs70cWOduZpkS1E78=
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
-github.com/dustin/go-humanize v1.0.0 h1:VSnTsYCnlFHaM2/igO1h6X3HA71jcobQuxemgkq4zYo=
-github.com/dustin/go-humanize v1.0.0/go.mod h1:HtrtbFcZ19U5GC7JDqmcUSB87Iq5E25KnS6fMYU6eOk=
 github.com/fatih/color v1.13.0 h1:8LOYc1KYPPmyKMuN8QV2DNRWNbLo6LZ0iLs8+mlH53w=
 github.com/fatih/color v1.13.0/go.mod h1:kLAiJbzzSOZDVNGyDpeOxJ47H46qBXwg5ILebYFFOfk=
 github.com/fatih/structs v1.1.0 h1:Q7juDM0QtcnhCpeyLGQKyg4TOIghuNXrkL32pHAUMxo=
