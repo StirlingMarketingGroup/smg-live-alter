@@ -1,7 +1,7 @@
 github.com/Ompluscator/dynamic-struct v1.3.0 h1:Ozvw+T2UOmV/2J2/L7tPZxrypKen3CGSBwmWj8pwC4Q=
 github.com/Ompluscator/dynamic-struct v1.3.0/go.mod h1:01g22H1GC9IFcrpQ4JQBkzynp8RoT0wmUMx/OvXNnw8=
-github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221121180710-54cb9eaf018c h1:2PZt2AMS8XsmSAetlzYAujlhCdu4/dibWbnaaJ+ZWsw=
-github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221121180710-54cb9eaf018c/go.mod h1:R90FFhMAShSo8C2Fk9DN4/z6w0JWdDOXOWj7Tn1kcyU=
+github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221123151840-d6d3d1f1e306 h1:VDAiHsmF6oyM7zVnJx1iDmGkZqNa6esmThrvRohbadQ=
+github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221123151840-d6d3d1f1e306/go.mod h1:R90FFhMAShSo8C2Fk9DN4/z6w0JWdDOXOWj7Tn1kcyU=
 github.com/VividCortex/ewma v1.2.0 h1:f58SaIzcDXrSy3kWaHNvuJgJ3Nmz59Zji6XoJR/q1ow=
 github.com/VividCortex/ewma v1.2.0/go.mod h1:nz4BbCtbLyFDeC9SUHbtcT5644juEuWfUAUnGx7j5l4=
 github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d h1:licZJFw2RwpHMqeKTCYkitsPqHNxTmd4SNR5r94FGM8=
@@ -175,8 +175,6 @@ golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f/go.mod h1:RxMgew5VJxzue5/jJ
 golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
 golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
 golang.org/x/sync v0.0.0-20210220032951-036812b2e83c/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
-golang.org/x/sync v0.1.0 h1:wsuoTGHzEhffawBOhz5CYhcrV4IdKZbEyZjBMuTp12o=
-golang.org/x/sync v0.1.0/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
 golang.org/x/sys v0.0.0-20180909124046-d0be0721c37e/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
 golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
 golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=

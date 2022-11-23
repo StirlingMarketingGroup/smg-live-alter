@@ -181,12 +181,25 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	i := 0
+	for _, c := range newColumns {
+		// we never want anything to do with new generated columns
+		if len(c.GenerationExpression) != 0 {
+			continue
+		}
+
+		newColumns[i] = c
+		i++
+	}
+	newColumns = newColumns[:i]
+
 	newColumnsSet := columnsSet(newColumns)
 	newColumnsIntersect := make(map[string]struct{})
 	oldPrimaryColumns := make([]*column, 0)
 	newPrimaryColumns := make([]*column, 0)
 
-	i := 0
+	i = 0
 	for _, c := range oldColumns {
 		newColumnName := oldColumnsMap[c.ColumnName]
 

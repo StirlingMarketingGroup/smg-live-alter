@@ -4,7 +4,7 @@ go 1.19
 
 require (
 	github.com/Ompluscator/dynamic-struct v1.3.0
-	github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221121180710-54cb9eaf018c
+	github.com/StirlingMarketingGroup/cool-mysql v0.0.0-20221123151840-d6d3d1f1e306
 	github.com/fatih/color v1.13.0
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/posener/cmd v1.3.4
@@ -40,6 +40,5 @@ require (
 	go.uber.org/atomic v1.10.0 // indirect
 	go.uber.org/multierr v1.8.0 // indirect
 	go.uber.org/zap v1.23.0 // indirect
-	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.0.0-20220909162455-aba9fc2a8ff2 // indirect
 )
