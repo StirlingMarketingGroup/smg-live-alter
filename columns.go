@@ -3,7 +3,7 @@ package main
 import (
 	"strings"
 
-	cool "github.com/StirlingMarketingGroup/cool-mysql"
+	mysql "github.com/StirlingMarketingGroup/cool-mysql"
 )
 
 // the mysql lib we're using, cool mysql, lets us define a
@@ -18,8 +18,8 @@ type column struct {
 	PrimaryKey           bool
 }
 
-func getTableColumns(db *cool.Database, tableName string) ([]*column, error) {
-	var columns []*column
+func getTableColumns(db *mysql.Database, tableName string) ([]column, error) {
+	var columns []column
 
 	// we need to check to see if the db supports generated columns
 	// if it doesn't, our query to get column info will fail
@@ -47,7 +47,7 @@ func getTableColumns(db *cool.Database, tableName string) ([]*column, error) {
 		return nil, err
 	}
 
-	var primaryKeys []*struct {
+	var primaryKeys []struct {
 		ColumnName string `mysql:"Column_name"`
 	}
 	err = db.Select(&primaryKeys, "show index from`"+tableName+"`where`Key_name`='PRIMARY'", 0)
@@ -60,7 +60,8 @@ func getTableColumns(db *cool.Database, tableName string) ([]*column, error) {
 		primaryKeysSet[pk.ColumnName] = struct{}{}
 	}
 
-	for _, c := range columns {
+	for i := range columns {
+		c := &columns[i]
 		if _, ok := primaryKeysSet[c.ColumnName]; ok {
 			c.PrimaryKey = true
 		}
@@ -69,11 +70,11 @@ func getTableColumns(db *cool.Database, tableName string) ([]*column, error) {
 	return columns, nil
 }
 
-func quoteColumns(columns []*column) string {
+func quoteColumns(columns []column) string {
 	return quoteColumnsPrefix(columns, "")
 }
 
-func quoteColumnsPrefix(columns []*column, prefix string) string {
+func quoteColumnsPrefix(columns []column, prefix string) string {
 	// this is our string builder for quoted column names,
 	// which will be used in our select statement
 	columnsQuotedBld := new(strings.Builder)
@@ -92,10 +93,18 @@ func quoteColumnsPrefix(columns []*column, prefix string) string {
 	return columnsQuotedBld.String()
 }
 
-func columnsSet(columns []*column) map[string]struct{} {
+func columnsSet(columns []column) map[string]struct{} {
 	set := make(map[string]struct{}, len(columns))
 	for _, c := range columns {
 		set[c.ColumnName] = struct{}{}
 	}
 	return set
+}
+
+func columnNames(columns []column) []string {
+	names := make([]string, len(columns))
+	for i, c := range columns {
+		names[i] = c.ColumnName
+	}
+	return names
 }

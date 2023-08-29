@@ -7,10 +7,10 @@ import (
 	"strings"
 
 	dynamicstruct "github.com/Ompluscator/dynamic-struct"
-	cool "github.com/StirlingMarketingGroup/cool-mysql"
+	mysql "github.com/StirlingMarketingGroup/cool-mysql"
 )
 
-func tableRowStruct(columns []*column) (bld dynamicstruct.Builder, pkIndexes []int, err error) {
+func tableRowStruct(columns []column) (bld dynamicstruct.Builder, pkIndexes []int, err error) {
 	// this is our dynamic struct of the actual row, which will have
 	// properties added to it for each column in the following loop
 	rowStruct := dynamicstruct.NewStruct()
@@ -72,7 +72,7 @@ func tableRowStruct(columns []*column) (bld dynamicstruct.Builder, pkIndexes []i
 			// our cool mysql literal is exactly what it sounds like;
 			// passed directly into the query with no escaping, which is know is
 			// safe here because a decimal from mysql can't contain breaking characters
-			v = new(cool.RawMySQL)
+			v = new(mysql.Raw)
 		case "timestamp", "date", "datetime":
 			v = new(string)
 		case "binary", "varbinary", "blob", "tinyblob", "mediumblob", "longblob":

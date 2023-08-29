@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
-	cool "github.com/StirlingMarketingGroup/cool-mysql"
+	mysql "github.com/StirlingMarketingGroup/cool-mysql"
 	"github.com/fatih/color"
+	"github.com/juliangruber/go-intersect/v2"
 	"github.com/posener/cmd"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
@@ -61,14 +62,14 @@ func main() {
 
 	// source connection is the first argument
 	// this is where our rows are coming from
-	db, err := cool.NewFromDSN(dbDSN, dbDSN)
+	db, err := mysql.NewFromDSN(dbDSN, dbDSN)
 	if err != nil {
 		panic(err)
 	}
 
 	if *verbose {
-		db.Log = func(query string, params cool.Params, duration time.Duration, cacheHit bool) {
-			log.Println(query)
+		db.Log = func(detail mysql.LogDetail) {
+			log.Println(detail.Query)
 		}
 	}
 
@@ -196,8 +197,8 @@ func main() {
 
 	newColumnsSet := columnsSet(newColumns)
 	newColumnsIntersect := make(map[string]struct{})
-	oldPrimaryColumns := make([]*column, 0)
-	newPrimaryColumns := make([]*column, 0)
+	oldPrimaryColumns := make([]column, 0)
+	newPrimaryColumns := make([]column, 0)
 
 	i = 0
 	for _, c := range oldColumns {
@@ -237,6 +238,21 @@ func main() {
 		}
 	}
 	newColumns = newColumns[:i]
+
+	if len(newPrimaryColumns) != len(oldPrimaryColumns) {
+		oldPrimaryColumnNames := columnNames(oldPrimaryColumns)
+		newPrimaryColumnNames := columnNames(newPrimaryColumns)
+		isect := intersect.HashGeneric(oldPrimaryColumnNames, newPrimaryColumnNames)
+		if len(isect) < len(oldPrimaryColumns) && len(isect) < len(newPrimaryColumns) {
+			panic("primary key column names and number of primary key columns changed at the same time")
+		}
+
+		if len(isect) == len(oldPrimaryColumns) {
+			newPrimaryColumns = oldPrimaryColumns
+		} else {
+			oldPrimaryColumns = newPrimaryColumns
+		}
+	}
 
 	insertTrigger := tableName + "_after_insert" + *tempTableSuffix
 	log.Println("dropping insert trigger (if it exists)")
@@ -328,8 +344,8 @@ func main() {
 		for {
 			var where string
 			if !firstChunk {
-				where, _ = cool.InlineParams("where(@@pks)>(@@prevIDs)", cool.Params{
-					"pks":     cool.RawMySQL(quoteColumns(oldPrimaryColumns)),
+				where, _, _ = db.InterpolateParams("where(@@pks)>(@@prevIDs)", mysql.Params{
+					"pks":     mysql.Raw(quoteColumns(oldPrimaryColumns)),
 					"prevIDs": prevIDs,
 				})
 			}
@@ -339,11 +355,11 @@ func main() {
 				"from @@table "+
 				"@@where "+
 				"order by @@pks "+
-				"limit @@limit ", 0, cool.Params{
-				"cols":  cool.RawMySQL(selectColumns.String()),
-				"table": cool.RawMySQL(fmt.Sprintf("`%s`", tableName)),
-				"where": cool.RawMySQL(where),
-				"pks":   cool.RawMySQL(quoteColumns(oldPrimaryColumns)),
+				"limit @@limit ", 0, mysql.Params{
+				"cols":  mysql.Raw(selectColumns.String()),
+				"table": mysql.Raw(fmt.Sprintf("`%s`", tableName)),
+				"where": mysql.Raw(where),
+				"pks":   mysql.Raw(quoteColumns(oldPrimaryColumns)),
 				"limit": *rowBufferSize,
 			})
 			if err != nil {
@@ -497,5 +513,5 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Println("finished altering", tableName, "in", time.Since(start))
+	log.Println("finished altering", tableName, "in", time.Since(start))
 }
