@@ -437,15 +437,9 @@ func main() {
 		os.Exit(0)
 	}
 
-	tx, cancel, err := db.BeginTx()
-	defer cancel()
-	if err != nil {
-		panic(err)
-	}
-
 	// stop foreign key checks
 	log.Println("disabling foreign key checks for our connection")
-	err = tx.Exec("set foreign_key_checks=0")
+	err = db.Exec("set foreign_key_checks=0")
 	if err != nil {
 		panic(err)
 	}
@@ -471,7 +465,7 @@ func main() {
 
 	// drop the old table now that our temp table is done
 	log.Println("dropping the original table")
-	err = tx.Exec("drop table if exists`" + tableName + "`")
+	err = db.Exec("drop table if exists`" + tableName + "`")
 	if err != nil {
 		panic(err)
 	}
@@ -481,7 +475,7 @@ func main() {
 	// comma and adding the word "add" at the beginning of each line
 	if len(constraints) != 0 {
 		log.Println("adding constraints")
-		err = tx.Exec("alter table`" + tempTableName + "`" + strings.ReplaceAll(strings.TrimLeft(constraints, ","), "\n", "\nadd"))
+		err = db.Exec("alter table`" + tempTableName + "`" + strings.ReplaceAll(strings.TrimLeft(constraints, ","), "\n", "\nadd"))
 		if err != nil {
 			panic(err)
 		}
@@ -489,7 +483,7 @@ func main() {
 
 	for _, r := range triggers {
 		log.Println("adding original triggers")
-		err = tx.Exec(renameTriggerTable(r.CreateMySQL, tempTableName))
+		err = db.Exec(renameTriggerTable(r.CreateMySQL, tempTableName))
 		if err != nil {
 			panic(err)
 		}
@@ -503,12 +497,7 @@ func main() {
 	// if you're doing this live, there *is* some down time, but other tools handle this the same
 	// way, so I don't think it's unreasonable if we do the same
 	log.Println("renaming temp table")
-	err = tx.Exec("alter table`" + tempTableName + "`rename`" + tableName + "`")
-	if err != nil {
-		panic(err)
-	}
-
-	err = tx.Commit()
+	err = db.Exec("alter table`" + tempTableName + "`rename`" + tableName + "`")
 	if err != nil {
 		panic(err)
 	}
