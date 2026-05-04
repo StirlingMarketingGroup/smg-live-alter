@@ -420,8 +420,7 @@ func main() {
 		}
 		chunkStartTime = time.Now()
 	}).SetAfterRowExec(func(start time.Time) {
-		bar.Increment()
-		bar.DecoratorEwmaUpdate(time.Since(start))
+		bar.EwmaIncrement(time.Since(start))
 	}).Insert("insert ignore into`"+tempTableName+"`", ch)
 	if err != nil {
 		panic(err)
@@ -469,6 +468,9 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	// sleep for a second to make sure the drop is done?
+	time.Sleep(1 * time.Second)
 
 	// no we can add back our constraints if we have them
 	// converting our constraints to alter table syntax by removing our leading
