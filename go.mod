@@ -9,7 +9,7 @@ require (
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/juliangruber/go-intersect/v2 v2.0.1
 	github.com/posener/cmd v1.3.4
-	github.com/vbauerster/mpb/v8 v8.12.0
+	github.com/vbauerster/mpb/v8 v8.12.1
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -41,5 +41,5 @@ require (
 	go.uber.org/zap v1.28.0 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
 )
