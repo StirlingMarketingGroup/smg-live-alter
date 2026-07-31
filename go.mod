@@ -4,12 +4,12 @@ go 1.25.0
 
 require (
 	github.com/Ompluscator/dynamic-struct v1.3.0
-	github.com/StirlingMarketingGroup/cool-mysql v0.0.25
+	github.com/StirlingMarketingGroup/cool-mysql v0.0.38
 	github.com/fatih/color v1.19.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/juliangruber/go-intersect/v2 v2.0.1
 	github.com/posener/cmd v1.3.4
-	github.com/vbauerster/mpb/v8 v8.12.1
+	github.com/vbauerster/mpb/v8 v8.13.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -28,7 +28,7 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
-	github.com/mattn/go-runewidth v0.0.23 // indirect
+	github.com/mattn/go-runewidth v0.0.24 // indirect
 	github.com/posener/complete/v2 v2.1.0 // indirect
 	github.com/posener/formatter v1.0.0 // indirect
 	github.com/posener/script v1.2.0 // indirect
@@ -39,7 +39,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 )
