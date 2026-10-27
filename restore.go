@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -16,7 +17,8 @@ type foreignKey struct {
 
 type originalTrigger struct {
 	Name, SQLMode, Collation string
-	Create                   string // SHOW CREATE TRIGGER statement, header retargeted to the temp table
+	Original                 string // SHOW CREATE TRIGGER, kept so an undo can put it back on the source
+	Create                   string // header retargeted to the temp table
 }
 
 type inboundKey struct {
@@ -30,12 +32,30 @@ type restorePlan struct {
 	Inbound     []inboundKey      // compared at the prompt
 }
 
-// one post-drop statement; the swap executes these and the recovery file renders them
+// one swap statement; the swap executes these and the recovery file renders them
 type restoreStep struct {
 	Purpose string
 	SQL     string // complete, no placeholders
 	Trigger bool   // rendered inside DELIMITER $$ … $$ in the recovery file
+
+	// Set on the locked swap's forward steps so a failure can count how far it got.
+	dropsOriginal bool
+	addsOriginal  bool
+	renames       bool
 }
+
+// cutOverAtomic renames under LOCK TABLES. cutOverDropFirst drops the original
+// table first. Foreign keys follow a renamed table, and a foreign key name is
+// unique in the schema, so a table that has any cannot be swapped with a rename.
+type cutOverStrategy int
+
+const (
+	cutOverDropFirst cutOverStrategy = iota
+	cutOverAtomic
+)
+
+// A longer metadata-lock wait would queue every other query behind the swap.
+const cutOverLockWaitSeconds = 10
 
 func addForeignKeys(table string, foreignKeys []foreignKey, named bool) string {
 	clauses := make([]string, len(foreignKeys))
@@ -48,31 +68,180 @@ func addForeignKeys(table string, foreignKeys []foreignKey, named bool) string {
 	return "alter table " + quoteIdent(table) + " " + strings.Join(clauses, ", ")
 }
 
-func (p restorePlan) steps(tableName, tempTableName, sessionSQLMode, sessionCollation string) []restoreStep {
-	var out []restoreStep
-	if len(p.ForeignKeys) > 0 {
-		out = append(out, restoreStep{Purpose: "adding foreign keys", SQL: addForeignKeys(tempTableName, p.ForeignKeys, true)})
+func sessionModeStep(sessionSQLMode, sessionCollation string) restoreStep {
+	return restoreStep{
+		Purpose: "restoring session sql_mode and collation",
+		SQL:     "set session sql_mode=" + quoteString(sessionSQLMode) + ", collation_connection=" + quoteString(sessionCollation),
 	}
+}
+
+func triggerModeStep(tr originalTrigger) restoreStep {
+	return restoreStep{
+		Purpose: "setting original trigger " + tr.Name + " sql_mode and collation",
+		SQL:     "set session sql_mode=" + quoteString(tr.SQLMode) + ", collation_connection=" + quoteString(tr.Collation),
+	}
+}
+
+func (p restorePlan) originalTriggerSteps() []restoreStep {
+	out := make([]restoreStep, 0, len(p.Triggers)*2)
 	for _, tr := range p.Triggers {
-		out = append(out, restoreStep{
-			Purpose: "setting original trigger " + tr.Name + " sql_mode and collation",
-			SQL:     "set session sql_mode=" + quoteString(tr.SQLMode) + ", collation_connection=" + quoteString(tr.Collation),
-		})
+		out = append(out, triggerModeStep(tr))
 		out = append(out, restoreStep{
 			Purpose: "adding original trigger " + tr.Name,
 			SQL:     tr.Create,
 			Trigger: true,
 		})
 	}
-	out = append(out, restoreStep{
-		Purpose: "restoring session sql_mode and collation",
-		SQL:     "set session sql_mode=" + quoteString(sessionSQLMode) + ", collation_connection=" + quoteString(sessionCollation),
-	})
+	return out
+}
+
+func (p restorePlan) steps(tableName, tempTableName, sessionSQLMode, sessionCollation string) []restoreStep {
+	var out []restoreStep
+	if len(p.ForeignKeys) > 0 {
+		out = append(out, restoreStep{Purpose: "adding foreign keys", SQL: addForeignKeys(tempTableName, p.ForeignKeys, true)})
+	}
+	out = append(out, p.originalTriggerSteps()...)
+	out = append(out, sessionModeStep(sessionSQLMode, sessionCollation))
 	out = append(out, restoreStep{
 		Purpose: "renaming the temp table",
 		SQL:     "alter table " + quoteIdent(tempTableName) + " rename " + quoteIdent(tableName),
 	})
 	return out
+}
+
+// atomicSteps drops every original trigger before creating any of them: trigger
+// names are unique in the schema. The mirror triggers are not in the plan, so
+// they stay on the source and leave with it in the rename.
+func (p restorePlan) atomicSteps(tableName, tempTableName, oldTableName, runTableName, sessionSQLMode, sessionCollation string) []restoreStep {
+	out := make([]restoreStep, 0, len(p.Triggers)*3+3)
+	for _, tr := range p.Triggers {
+		out = append(out, restoreStep{
+			Purpose:       "dropping original trigger " + tr.Name,
+			SQL:           "drop trigger " + quoteIdent(tr.Name),
+			dropsOriginal: true,
+		})
+	}
+	n := len(out)
+	out = append(out, p.originalTriggerSteps()...)
+	for i := n; i < len(out); i++ {
+		if out[i].Trigger {
+			out[i].addsOriginal = true
+		}
+	}
+	out = append(out, sessionModeStep(sessionSQLMode, sessionCollation))
+	out = append(out, restoreStep{
+		Purpose: "renaming the tables",
+		SQL:     "rename table " + quoteIdent(tableName) + " to " + quoteIdent(oldTableName) + ", " + quoteIdent(tempTableName) + " to " + quoteIdent(tableName),
+		renames: true,
+	})
+	// The run record must not outlive the rename: the source and temp schemas are gone.
+	out = append(out, restoreStep{
+		Purpose: "dropping the run table",
+		SQL:     "drop table " + quoteIdent(runTableName),
+	})
+	return out
+}
+
+// undoSteps reverses a locked swap that has not renamed yet. dropped originals
+// left the source; created originals sit on the temp table. Names are
+// schema-wide, so the temp copies are dropped before any source trigger returns.
+func (p restorePlan) undoSteps(dropped, created int, sessionSQLMode, sessionCollation string) []restoreStep {
+	var out []restoreStep
+	for i := 0; i < created; i++ {
+		tr := p.Triggers[i]
+		out = append(out, restoreStep{
+			Purpose: "dropping original trigger " + tr.Name + " from the temp table",
+			SQL:     "drop trigger if exists " + quoteIdent(tr.Name),
+		})
+	}
+	for i := 0; i < dropped; i++ {
+		tr := p.Triggers[i]
+		out = append(out, triggerModeStep(tr))
+		out = append(out, restoreStep{
+			Purpose: "restoring original trigger " + tr.Name,
+			SQL:     tr.Original,
+			Trigger: true,
+		})
+	}
+	out = append(out, sessionModeStep(sessionSQLMode, sessionCollation))
+	return out
+}
+
+// atomicRecoverySteps is the whole undo, for the file written before the lock.
+// Each original is dropped first because it may already sit on the temp table.
+func (p restorePlan) atomicRecoverySteps(sessionSQLMode, sessionCollation string) []restoreStep {
+	out := make([]restoreStep, 0, len(p.Triggers)*3+1)
+	for _, tr := range p.Triggers {
+		out = append(out, restoreStep{
+			Purpose: "dropping original trigger " + tr.Name,
+			SQL:     "drop trigger if exists " + quoteIdent(tr.Name),
+		})
+		out = append(out, triggerModeStep(tr))
+		out = append(out, restoreStep{
+			Purpose: "restoring original trigger " + tr.Name,
+			SQL:     tr.Original,
+			Trigger: true,
+		})
+	}
+	out = append(out, sessionModeStep(sessionSQLMode, sessionCollation))
+	return out
+}
+
+// chooseCutOver picks the locked rename only when nothing references the table
+// by foreign key and RENAME TABLE of a write-locked table is available (8.0.13).
+// An unparsable version is drop-first.
+func chooseCutOver(plan restorePlan, version string) (cutOverStrategy, string) {
+	if len(plan.ForeignKeys) != 0 || len(plan.Inbound) != 0 {
+		return cutOverDropFirst, "the table has foreign keys"
+	}
+	if !mysqlVersionAtLeast(version, 8, 0, 13) {
+		return cutOverDropFirst, "the server is older than 8.0.13"
+	}
+	return cutOverAtomic, ""
+}
+
+func parseMySQLVersion(s string) (major, minor, patch int, ok bool) {
+	next := func(rest string) (n int, after string, ok bool) {
+		i := 0
+		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+			i++
+		}
+		if i == 0 {
+			return 0, rest, false
+		}
+		n, err := strconv.Atoi(rest[:i])
+		if err != nil {
+			return 0, rest, false
+		}
+		return n, rest[i:], true
+	}
+	major, s, ok = next(s)
+	if !ok || s == "" || s[0] != '.' {
+		return 0, 0, 0, false
+	}
+	minor, s, ok = next(s[1:])
+	if !ok || s == "" || s[0] != '.' {
+		return 0, 0, 0, false
+	}
+	patch, _, ok = next(s[1:])
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return major, minor, patch, true
+}
+
+func mysqlVersionAtLeast(version string, major, minor, patch int) bool {
+	a, b, c, ok := parseMySQLVersion(version)
+	if !ok {
+		return false
+	}
+	if a != major {
+		return a > major
+	}
+	if b != minor {
+		return b > minor
+	}
+	return c >= patch
 }
 
 func readRestorePlan(ctx context.Context, conn *sql.Conn, tableName, tempTableName string, foreignKeys []foreignKey, skip map[string]struct{}) (restorePlan, error) {
@@ -112,6 +281,7 @@ func readRestorePlan(ctx context.Context, conn *sql.Conn, tableName, tempTableNa
 		if err != nil {
 			return restorePlan{}, fmt.Errorf("trigger %s: %w", tr.Name, err)
 		}
+		p.Triggers[i].Original = create
 		p.Triggers[i].Create = rewritten
 	}
 	inbound, err := readInboundKeys(ctx, conn, tableName)
@@ -210,13 +380,17 @@ func (p restorePlan) equal(q restorePlan) bool {
 	return true
 }
 
-func recoverySQL(database, charset string, steps []restoreStep) string {
+func recoverySQL(database, charset string, steps []restoreStep, disableForeignKeyChecks bool) string {
 	var b strings.Builder
 	b.WriteString("use ")
 	b.WriteString(quoteIdent(database))
 	b.WriteString(";\nset names ")
 	b.WriteString(quoteIdent(charset))
-	b.WriteString(";\nset foreign_key_checks=0;\n")
+	b.WriteString(";\n")
+	// The locked swap has no foreign keys, so its file does not touch this.
+	if disableForeignKeyChecks {
+		b.WriteString("set foreign_key_checks=0;\n")
+	}
 	for _, s := range steps {
 		if s.Trigger {
 			b.WriteString("DELIMITER $$\n")
@@ -241,6 +415,92 @@ func execRestoreStep(ctx context.Context, conn *sql.Conn, step restoreStep, tabl
 		log.Fatalf("%s failed: %v; %s is dropped and its rows are in %s; finish by running the steps in %s from this one on (the done: lines above list the ones that ran)", step.Purpose, err, tableName, tempTableName, recoveryPath)
 	}
 	log.Printf("done: %s", step.Purpose)
+}
+
+// swapUnderLock holds the table lock for the whole rename. Other sessions wait
+// on it instead of seeing a missing name. The run table is locked because it
+// is dropped before the unlock. A failure before the rename is undone while
+// the lock is still held; the mirror triggers never moved, so a rerun resumes
+// at the swap prompt.
+func swapUnderLock(ctx context.Context, conn *sql.Conn, plan restorePlan, steps []restoreStep, tableName, tempTableName, oldTableName, runTableName, sessionSQLMode, sessionCollation, recoveryPath string) {
+	var lockWait int
+	if err := conn.QueryRowContext(ctx, "select @@session.lock_wait_timeout").Scan(&lockWait); err != nil {
+		log.Fatalf("could not lock %s: %v; nothing changed, rerun to try the swap again", tableName, err)
+	}
+	if lockWait > cutOverLockWaitSeconds {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("set session lock_wait_timeout=%d", cutOverLockWaitSeconds)); err != nil {
+			log.Fatalf("could not lock %s: %v; nothing changed, rerun to try the swap again", tableName, err)
+		}
+	}
+	lockSQL := "lock tables " + quoteIdent(tableName) + " write, " + quoteIdent(tempTableName) + " write, " + quoteIdent(runTableName) + " write"
+	if _, err := conn.ExecContext(ctx, lockSQL); err != nil {
+		log.Fatalf("could not lock %s: %v; nothing changed, rerun to try the swap again", tableName, err)
+	}
+
+	dropped, created := 0, 0
+	renamed := false
+	failedAfterRename := false
+	for _, step := range steps {
+		if _, err := conn.ExecContext(ctx, step.SQL); err != nil {
+			if renamed {
+				log.Printf("%s failed: %v; %s is swapped and %s still holds the previous table", step.Purpose, err, tableName, oldTableName)
+				failedAfterRename = true
+				break
+			}
+			undoLockedSwap(ctx, conn, plan.undoSteps(dropped, created, sessionSQLMode, sessionCollation), tableName, recoveryPath, step.Purpose, err)
+		}
+		log.Printf("done: %s", step.Purpose)
+		if step.dropsOriginal {
+			dropped++
+		}
+		if step.addsOriginal {
+			created++
+		}
+		if step.renames {
+			renamed = true
+		}
+	}
+
+	cleanupFailed := failedAfterRename
+	if _, err := conn.ExecContext(ctx, "unlock tables"); err != nil {
+		log.Printf("unlocking tables after swapping %s: %v", tableName, err)
+		cleanupFailed = true
+	}
+	if lockWait > cutOverLockWaitSeconds {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("set session lock_wait_timeout=%d", lockWait)); err != nil {
+			log.Printf("restoring lock_wait_timeout after swapping %s: %v", tableName, err)
+			cleanupFailed = true
+		}
+	}
+	if _, err := conn.ExecContext(ctx, "drop table "+quoteIdent(oldTableName)); err != nil {
+		log.Printf("dropping %s: %v", oldTableName, err)
+		cleanupFailed = true
+	}
+	if cleanupFailed {
+		// os.Exit skips the deferred close, and a live session would keep the lock.
+		conn.Close()
+		os.Exit(0)
+	}
+}
+
+func undoLockedSwap(ctx context.Context, conn *sql.Conn, steps []restoreStep, tableName, recoveryPath, purpose string, cause error) {
+	var undoErr error
+	for _, step := range steps {
+		if _, undoErr = conn.ExecContext(ctx, step.SQL); undoErr != nil {
+			break
+		}
+	}
+	if _, err := conn.ExecContext(ctx, "unlock tables"); err != nil && undoErr == nil {
+		// The triggers are already back. Closing the session releases the lock if this failed.
+		log.Printf("unlocking tables after undoing the swap of %s: %v", tableName, err)
+	}
+	conn.Close()
+	if undoErr != nil {
+		log.Fatalf("%s failed: %v, and undoing it failed: %v; %s may be missing original triggers. Run %s to put them back on %s, then rerun to try the swap again",
+			purpose, cause, undoErr, tableName, recoveryPath, tableName)
+	}
+	log.Fatalf("%s failed: %v; the swap was undone and %s has its triggers again; rerun to try the swap again",
+		purpose, cause, tableName)
 }
 
 func readInboundKeys(ctx context.Context, conn *sql.Conn, tableName string) ([]inboundKey, error) {

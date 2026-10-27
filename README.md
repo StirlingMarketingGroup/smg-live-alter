@@ -27,6 +27,8 @@ During the 1h 50m `emails` copy, the Aurora reader's lag stayed at 4–25 ms and
 - **No binary log needed.** gh-ost reads the binary log, so it can't run on a server with the log turned off, like our Aurora cluster. This tool only needs triggers.
 - **Your triggers keep working.** Before the new table takes the old name, the tool puts every existing trigger back on it, in its original order and with its original `sql_mode` and collation. No write ever lands on the table without them.
 - **Foreign keys into the table survive.** Other tables' foreign keys follow the table through the swap, and the tool checks that they will still fit before it starts.
+- **With no foreign keys, queries wait for the swap.** The tool locks the table, moves the triggers, and renames while it holds that lock, so other sessions wait and then run on the new table. The lock also takes every table the table's triggers use. The tool caps that wait at 10 seconds. The login needs the `LOCK TABLES` privilege.
+- **With foreign keys, the name is missing between the drop and the rename.** A foreign key follows a renamed table, and its name cannot exist on two tables, so the old table is dropped first. Queries in that window fail and have to be retried.
 - **It is gentle on Aurora readers.** The copy waits whenever a reader falls more than `-max-lag` behind.
 - **It can stop and pick up where it left off.** Stop it at any point and rerun the same alter; it continues from the last chunk.
 - **It refuses what it can't prove.** If a change could lose or merge rows, or a trigger or foreign key wouldn't survive it, the tool stops before it touches anything. The rules are in "How it works" below.
@@ -97,7 +99,7 @@ prod:
 
 Each entry under `params` goes into the DSN, and the MySQL driver sets it as a session variable. `lock_wait_timeout: "10"` makes the drop and rename give up after 10 seconds instead of queuing every other query behind a long lock wait.
 
-The login needs the `TRIGGER` privilege on the table. If the table's own triggers are owned by another account, the tool re-creates them under that owner, which needs `SET_USER_ID` or `SUPER`. On Aurora, the admin login has it through `rds_superuser_role`.
+The login needs the `TRIGGER` privilege on the table, and `LOCK TABLES` when the table has no foreign keys. If the table's own triggers are owned by another account, the tool re-creates them under that owner, which needs `SET_USER_ID` or `SUPER`. On Aurora, the admin login has it through `rds_superuser_role`.
 
 ---
 
@@ -121,14 +123,22 @@ Answering `n` at `do the drop/swap?` leaves the temp table, the mirror triggers,
 
 Triggers on the original table mirror inserts, updates, and deletes into that one temp table. They are created on one session, the delete trigger first, then the update trigger, then the insert trigger, under the server's global `sql_mode`. A trigger keeps the `sql_mode` it was created with, and the application's sessions use that mode, so the triggers store what the application's writes store after the swap. None of them uses `IGNORE`: a write the destination rejects fails the application's statement. The delete trigger deletes the temp row whose key equals the old source key. The update trigger updates that temp row in place, which moves the row when its primary key changes and leaves an added column's default as it is, then inserts the new row only when no temp row has the new key. The insert trigger inserts the new row. The copy and the swap run on that same session, so `foreign_key_checks`, `sql_mode`, the copy's isolation level, and the cursor variables stay put.
 
-Once the data is all copied into the temp table, the restore plan is read again. If the source's triggers or foreign keys changed during the copy, the tool stops before the drop; rerun it. That re-check is a cheap guard for the no-other-DDL assumption, not a proof. The same post-drop steps are written to `smgla-recovery-<table>-<unix seconds>.sql` in the working directory. If a step fails after the drop, finish from that step onward by pasting the remaining statements from that file into the mysql client.
+Once the data is all copied into the temp table, the restore plan is read again. If the source's triggers or foreign keys changed during the copy, the tool stops before the swap; rerun it. That re-check is a cheap guard for the no-other-DDL assumption, not a proof. The recovery statements are written to `smgla-recovery-<table>-<unix seconds>.sql` in the working directory before anything is dropped or locked.
 
-1. The old table is dropped. This happens now to avoid consistency problems. We understand that dropping this table first and then doing other things before the temp table is renamed will cause a very small amount of time that no table exists with the original table's name, but we took this tradeoff to ensure the data is as consistent as possible. Essentially, we require that the application using the table in production retries its queries if the table does not exist
+When the table has no foreign keys, on MySQL 8.0.13 or newer, the swap holds `LOCK TABLES`. Other sessions wait, and they run on the new table when the lock is released. The login needs the `LOCK TABLES` privilege. The lock also takes every table the table's triggers use, and the tool caps the wait at 10 seconds.
 
+1. Lock the original table, the temp table, and the run table. The run table is locked so it can be dropped before the unlock.
+2. Drop each original trigger, then create it on the temp table under the `sql_mode` and `collation_connection` it was created with. The mirror triggers stay on the original table until the rename.
+3. Rename the original table out of the way and the temp table into its name, in one `RENAME TABLE`, then drop the run table.
+4. Unlock, put `lock_wait_timeout` back, and drop the previous table.
+
+If a step fails before that rename, the tool puts the original triggers back and unlocks. The temp table, the mirror triggers, and the run record stay, so the next run resumes at the swap prompt. The recovery file is that undo. If the undo fails, run the file to put the triggers back on the original table, then rerun.
+
+When the table has foreign keys, or the server is older than 8.0.13, the old table is dropped first. A foreign key follows a renamed table, and a foreign key name cannot sit on both tables, so one rename would point other tables at the old schema. The recovery file is the remaining forward steps. If a step fails after the drop, finish from that step onward by pasting the remaining statements from that file into the mysql client.
+
+1. The old table is dropped. Until the rename below, no table has the original name, and queries fail. Retry them.
 2. Foreign keys go back onto the temp table, one `ALTER TABLE` from the restore plan. Check constraints are already there: a generated name `<table>_chk_<n>` is created on the temp table as `<temp>_chk_<n>`, and MySQL renames it back with the table. A `DROP CHECK`, `ALTER CHECK`, `DROP CONSTRAINT`, or `ALTER CONSTRAINT` in the alter is rewritten to that temp name before the alter runs. A custom check name can't be kept, so it gets a generated one. Foreign keys are left off the temp table at creation because their names are unique to the whole database, and they're added here, after the original table is dropped, with foreign key checks turned off.
-
-3. Restore the original triggers onto the temp table, in `ACTION_ORDER`, each under the `sql_mode` and `collation_connection` it was created with. The table name in the `ON … FOR EACH ROW` header is rewritten to the temp table. The session's `sql_mode` and `collation_connection` are put back afterwards. We do this before the rename because triggers are *ultra-important* for us, and we can't have the table being written to without our triggers, so we'd rather it not exist yet.
-
+3. Restore the original triggers onto the temp table, in `ACTION_ORDER`, each under the `sql_mode` and `collation_connection` it was created with. The table name in the `ON … FOR EACH ROW` header is rewritten to the temp table. The session's `sql_mode` and `collation_connection` are put back afterwards. The triggers are back before the rename, so the table is not written without them.
 4. Rename the temp table to the original table's name.
 
 5. ???
