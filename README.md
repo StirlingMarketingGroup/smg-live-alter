@@ -1,14 +1,43 @@
 # SMG Live Alter
 
+Change a big, busy MySQL table while the app keeps writing to it. Your triggers keep firing, the foreign keys that point at the table survive, and you don't need the binary log.
+
+### Proven on production
+
+Every run below changed every ID column on a live Aurora MySQL 3 table (binary log off) while the app kept writing to it. Each ran from one EC2 box in the same region.
+
+| Table | Rows | Size | Indexes | Triggers | Time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `emails` | 17.4M | 44 GB | 30 | 0 | 1h 50m |
+| `emailopens` | 26.4M | 11 GB | 11 | 0 | 46m 43s |
+| `emailclicks` | 2.7M | 1.2 GB | 11 | 0 | 4m 27s |
+| `orderlineitems` | 1.5M | 1.5 GB | 26 | 5 | 6m 18s |
+| `cartitems` | 0.8M | 0.3 GB | 9 | 0 | 1m 00s |
+
+During the 1h 50m `emails` copy, the Aurora reader's lag stayed at 4–25 ms and the copy never had to pause. At the swap, the table name was missing for about a second.
+
+### Why it's fast
+
+- **Rows never leave the server.** Each chunk is one `insert … select` on the writer, so no row crosses the network and nothing is parsed in Go.
+- **Chunks size themselves.** Each chunk aims for about 500 ms and grows up to 10,000 rows, so a narrow table moves in big bites and a wide one in small ones.
+- **It reads by the primary key.** Every chunk is a range on the primary key, so MySQL never scans the table to find where to start.
+
+### What it handles
+
+- **No binary log needed.** gh-ost reads the binary log, so it can't run on a server with the log turned off, like our Aurora cluster. This tool only needs triggers.
+- **Your triggers keep working.** Before the new table takes the old name, the tool puts every existing trigger back on it, in its original order and with its original `sql_mode` and collation. No write ever lands on the table without them.
+- **Foreign keys into the table survive.** Other tables' foreign keys follow the table through the swap, and the tool checks that they will still fit before it starts.
+- **It is gentle on Aurora readers.** The copy waits whenever a reader falls more than `-max-lag` behind.
+- **It can stop and pick up where it left off.** Stop it at any point and rerun the same alter; it continues from the last chunk.
+- **It refuses what it can't prove.** If a change could lose or merge rows, or a trigger or foreign key wouldn't survive it, the tool stops before it touches anything. The rules are in "How it works" below.
+
 ### Background
 
-Yet another tool to apply alters to MySQL tables without down time. Why another one? Surely Percona, Facebook, and GitHub have all covered this well enough their versions, but for our purposes, just not quite.
+Yet another tool to apply alters to MySQL tables without downtime. Why another one? Percona, Facebook, and GitHub have all covered this well enough for their uses, but for ours, not quite.
 
-Not to hate on Percona or their pt-online-schema-change, but that tool has just enough small problems with it to be more than annoying for our use. Particularly how it treats triggers on tables. We rely on MySQL triggers on our tables to keep tons of denormalized statistics and other information consistent. Now, the Percona tool does claim to support keeping your triggers where they are, but I have yet to see this actually work in real world use except for *super* specific cases, like the table has to be under a certain size, not have foreign keys referencing it, and can't be a day ending in 'y', which in our case is most of our tables.
+Percona's pt-online-schema-change has just enough small problems to be more than annoying for us, particularly in how it treats triggers. We rely on MySQL triggers to keep tons of denormalized statistics and other information consistent. The Percona tool claims to keep your triggers where they are, but I have yet to see that work in real use except in *super* specific cases: the table has to be under a certain size, can't have foreign keys referencing it, and can't be a day ending in 'y'. That's most of our tables.
 
-The tool preserves existing triggers during the schema change.
-
-Another problem with that tool and almost all of the others is that they're quite complicated, which I why I think bugs in the Percona tool exist (like Binary columns being treated as the table's charset and throwing errors about values not being valid UTF8), but not this one.
+The other tools are also quite complicated, which I think is why bugs like the Percona tool's (binary columns treated as the table's charset, then rejected as invalid UTF-8) exist there and not here.
 
 ---
 ### Prerequisites
@@ -36,7 +65,7 @@ smg-live-alter [flags] localhost
 ```
 ### Flags:
 
-  - `-c` your connections file (default `~/.config/smgla/connections.yaml` on Linux, `~/Library/Application Support/smgla/connections.yaml` on macOS, more info below)
+  - `-c` your connections file (default `~/.config/smgla/connections.yaml` on Linux, `~/Library/Application Support/smgla/connections.yaml` on macOS; see "Connections file" below)
   - `-suffix` suffix of the temp table used for initial creation before the swap and drop (default `_smgla_`)
   - `-r` value
         starting rows per copy chunk; adjusted to keep each chunk near 500ms (default 1000)
@@ -52,13 +81,31 @@ There’re two arguments I can see here that may need a tad explained, however:
 
 The tool parses the table name and other things from the alter query, so there's no need to give that as a separate option (looking at you two, GitHub and Percona).
 
+### Connections file
+
+Name a connection once and pass its name instead of a DSN:
+
+```yaml
+prod:
+  user: "web"
+  pass: "…"
+  host: "db.example.com:3306"
+  schema: sterling
+  params:
+    lock_wait_timeout: "10"
+```
+
+Each entry under `params` goes into the DSN, and the MySQL driver sets it as a session variable. `lock_wait_timeout: "10"` makes the drop and rename give up after 10 seconds instead of queuing every other query behind a long lock wait.
+
+The login needs the `TRIGGER` privilege on the table. If the table's own triggers are owned by another account, the tool re-creates them under that owner, which needs `SET_USER_ID` or `SUPER`. On Aurora, the admin login has it through `rds_superuser_role`.
+
 ---
 
 ### How it works
 
 Unlike the ultra-fancy way that the GitHub tool works, this one works more closely to how the rest work; with triggers. Now the fact that this uses triggers means that it will **only work with MySQL version 5.7.2 and above**. Another requirement of this tool is that it **only works with tables that have primary keys**. The copy walks that key in index order, and every key column has to be an integer, a decimal, or a char/binary string. The cursor lives in user variables, and MySQL will not keep a date, an enum, or a float in one of those and still order it like the index.
 
-The tool refuses an alter it cannot mirror. A foreign key on the table whose update or delete rule is `CASCADE`, `SET NULL`, or `SET DEFAULT` changes rows without firing triggers. A foreign key that references the table itself is refused, because the probe would resolve it against the old schema. Unique coverage also counts a derived column: a generated column whose expression is a conditional projection (`` `col` ``, or `if(<cond>, `col`, NULL)` / `if(<cond>, NULL, `col`)`) of a copied column, with the generated type equal to the projected column's type on each side, and a condition that is one integer column compared with an integer literal, unchanged by the alter. Any other generated column in a destination unique index has to be covered without that proof. Every destination unique index, the primary key included, has to be covered by a source unique index. A source index covers it when every source part maps to one of the destination index's parts, so extra destination parts need no proof. A functional source index covers nothing, because the same expression can yield different values after a type or charset change. A collation change on a unique column is refused, because distinct values can become equal. A unique-column conversion that does not keep values (for example `varbinary(2)` to `binary(2)`) is refused for every unique index, the primary key included, because two distinct source rows could land on one destination key. A generated source column that is stored on the destination is refused, because triggers cannot read generated columns. `destinationKey` requires a destination primary key copied from the source. The storage engine cannot change. Other tables' foreign keys that point at this table re-attach by name after the rename, so every referenced column has to map to a destination column with the same name, type, character set, and collation, and the destination has to keep an index whose leading columns are those columns in that order with no prefix length.
+The tool refuses an alter it cannot mirror. A foreign key on the table whose update or delete rule is `CASCADE`, `SET NULL`, or `SET DEFAULT` changes rows without firing triggers. A foreign key that references the table itself is refused, because the probe would resolve it against the old schema. The temp table starts without the table's own foreign keys, and the originals are added back after the swap, so an alter can't drop one. Drop it first with a plain `ALTER TABLE … DROP FOREIGN KEY`, which only changes metadata. Unique coverage also counts a derived column: a generated column whose expression is a conditional projection (`` `col` ``, or `if(<cond>, `col`, NULL)` / `if(<cond>, NULL, `col`)`) of a copied column, with the generated type equal to the projected column's type on each side, and a condition that is one integer column compared with an integer literal, unchanged by the alter. Any other generated column in a destination unique index has to be covered without that proof. Every destination unique index, the primary key included, has to be covered by a source unique index. A source index covers it when every source part maps to one of the destination index's parts, so extra destination parts need no proof. A functional source index covers nothing, because the same expression can yield different values after a type or charset change. A collation change on a unique column is refused, because distinct values can become equal. A unique-column conversion that does not keep values (for example `varbinary(2)` to `binary(2)`) is refused for every unique index, the primary key included, because two distinct source rows could land on one destination key. A generated source column that is stored on the destination is refused, because triggers cannot read generated columns. `destinationKey` requires a destination primary key copied from the source. The storage engine cannot change. Other tables' foreign keys that point at this table re-attach by name after the rename, so every referenced column has to map to a destination column with the same name, type, character set, and collation, and the destination has to keep an index whose leading columns are those columns in that order with no prefix length.
 
 Before any mirror trigger exists, the restore plan is compiled against a probe table (`<table><suffix>probe_`) created `LIKE` the altered temp table. That probe proves the foreign key definitions and the original trigger bodies compile against the altered columns. It does not prove the rename, permissions, or anything another session changes. The tool assumes no other DDL runs on the table or its foreign key neighbors during a run.
 
