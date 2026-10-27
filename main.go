@@ -32,6 +32,12 @@ var (
 
 	verbose = root.Bool("v", false, "writes the full query log to stdout")
 
+	maxLag = root.Duration("max-lag", time.Second, "pause the copy while an Aurora reader lags more than this; 0 turns pacing off")
+
+	fresh = root.Bool("fresh", false, "discard a stopped run of this alter and copy from the first row")
+
+	forgetReaders = root.Bool("forget-readers", false, "clear the Aurora readers a resumed run is waiting on")
+
 	args = root.Args("connection", "connection, ex:\n"+
 		"smg-live-alter [flags] 'user:pass@(host)/dbname'\n\n"+
 		"see: https://github.com/go-sql-driver/mysql#dsn-data-source-name\n\n"+
@@ -49,6 +55,9 @@ func main() {
 	}
 	if *rowBufferSize < 1 || *rowBufferSize > maxChunkRows {
 		log.Fatalf("-r is %d; the starting chunk must be 1 to %d rows", *rowBufferSize, maxChunkRows)
+	}
+	if *maxLag < 0 {
+		log.Fatalf("-max-lag is %s; it must be zero or positive", *maxLag)
 	}
 
 	dbDSN := (*args)[0]
@@ -162,6 +171,10 @@ func main() {
 	if len(probeTableName) > 64 {
 		log.Fatalf("cannot copy %s: probe table name %q is %d characters; MySQL identifiers are at most 64", tableName, probeTableName, len(probeTableName))
 	}
+	runTableName := tableName + *tempTableSuffix + "run_"
+	if len(runTableName) > 64 {
+		log.Fatalf("cannot copy %s: run table name %q is %d characters; MySQL identifiers are at most 64", tableName, runTableName, len(runTableName))
+	}
 
 	insertTrigger := tableName + "_after_insert" + *tempTableSuffix
 	updateTrigger := tableName + "_after_update" + *tempTableSuffix
@@ -172,20 +185,41 @@ func main() {
 		deleteTrigger: {},
 	}
 
-	// a run that stopped part way leaves its triggers writing into the temp
-	// table, so they go before the temp table does: in the other order every
-	// write to the source fails until the triggers are recreated
-	for _, trigger := range []string{insertTrigger, updateTrigger, deleteTrigger} {
-		log.Println("dropping trigger", trigger, "(if it exists)")
-		if err := db.Exec("drop trigger if exists " + quoteIdent(trigger)); err != nil {
-			panic(err)
-		}
+	match, err := stoppedRunFor(ctx, conn, runTableName, alterQuery)
+	if err != nil {
+		log.Fatalf("reading the run table: %v", err)
+	}
+	resuming := match && !*fresh
+	if resuming {
+		log.Println("found a stopped run of this alter; resuming it (use -fresh to start over)")
+	}
+	if *forgetReaders && !resuming {
+		log.Println("no stopped run to resume; -forget-readers has no effect")
 	}
 
-	log.Println("dropping temp table (if it exists)")
-	err = db.Exec("drop table if exists " + quoteIdent(tempTableName))
-	if err != nil {
-		panic(err)
+	// A run that stopped part way leaves its triggers writing into the temp
+	// table, so they go before the temp table does: in the other order every
+	// write to the source fails until the triggers are recreated.
+	// Resuming keeps the triggers, the temp table, and the run record.
+	if !resuming {
+		for _, trigger := range []string{insertTrigger, updateTrigger, deleteTrigger} {
+			log.Println("dropping trigger", trigger, "(if it exists)")
+			if err := db.Exec("drop trigger if exists " + quoteIdent(trigger)); err != nil {
+				panic(err)
+			}
+		}
+
+		log.Println("dropping run table (if it exists)")
+		err = db.Exec("drop table if exists " + quoteIdent(runTableName))
+		if err != nil {
+			panic(err)
+		}
+
+		log.Println("dropping temp table (if it exists)")
+		err = db.Exec("drop table if exists " + quoteIdent(tempTableName))
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	log.Println("dropping probe table (if it exists)")
@@ -206,16 +240,20 @@ func main() {
 	}
 	table.CreateMySQL = createMySQL
 
-	log.Println("creating temp table")
-	err = db.Exec("CREATE TABLE " + quoteIdent(tempTableName) + strings.TrimPrefix(table.CreateMySQL, "CREATE TABLE "+quoteIdent(tableName)))
-	if err != nil {
-		panic(err)
-	}
+	if resuming {
+		log.Println("keeping the existing temp table")
+	} else {
+		log.Println("creating temp table")
+		err = db.Exec("CREATE TABLE " + quoteIdent(tempTableName) + strings.TrimPrefix(table.CreateMySQL, "CREATE TABLE "+quoteIdent(tableName)))
+		if err != nil {
+			panic(err)
+		}
 
-	log.Println("applying alter to temp table")
-	err = db.Exec("alter table " + quoteIdent(tempTableName) + " " + rewriteCheckNames(alterPart, tableName, tempTableName))
-	if err != nil {
-		panic(err)
+		log.Println("applying alter to temp table")
+		err = db.Exec("alter table " + quoteIdent(tempTableName) + " " + rewriteCheckNames(alterPart, tableName, tempTableName))
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	oldColumnsMap := make(map[string]string)
@@ -270,6 +308,10 @@ func main() {
 	if srcEngine != tmpEngine {
 		log.Fatalf("cannot copy %s: storage engine changes from %s to %s", tableName, srcEngine, tmpEngine)
 	}
+	// The chunk and its checkpoint commit together, so a warned chunk rolls back instead of being resumed.
+	if srcEngine != "InnoDB" {
+		log.Fatalf("cannot copy %s: the copy needs InnoDB, the table uses %s", tableName, srcEngine)
+	}
 
 	destAllIndexes, err := getIndexes(db, tempTableName)
 	if err != nil {
@@ -298,6 +340,23 @@ func main() {
 	}
 	log.Printf("mirror triggers use sql_mode %q", mode)
 
+	// SHOW CREATE quoting follows this session's sql_mode. The resume check reads
+	// both statements after the same set, so the stored copies have to as well.
+	// The record has to exist before any mirror trigger. A crash while the
+	// triggers are being created then refuses to resume, instead of copying
+	// against a trigger set that did not mirror the whole run.
+	if !resuming {
+		var sourceNow, tempNow string
+		if err := conn.QueryRowContext(ctx, "show create table "+quoteIdent(tableName)).Scan(new(string), &sourceNow); err != nil {
+			log.Fatalf("reading the source table: %v", err)
+		}
+		if err := conn.QueryRowContext(ctx, "show create table "+quoteIdent(tempTableName)).Scan(new(string), &tempNow); err != nil {
+			log.Fatalf("reading the temp table: %v", err)
+		}
+		exec("creating the run table", runTableDDL(runTableName, traversalKey))
+		exec("recording the run", insertRunSQL(runTableName), alterQuery, normalizeCreate(sourceNow), normalizeCreate(tempNow))
+	}
+
 	insertSQL := fmt.Sprintf("insert into %s(%s)values(%s)", quoteIdent(tempTableName), mapping.insertList(), mapping.prefixedSources("new."))
 	deleteSQL := fmt.Sprintf("delete from %s where(%s)=(%s)", quoteIdent(tempTableName), destKey.insertList(), destKey.prefixedSources("old."))
 	// The application's update holds the source row's lock, so the copy cannot
@@ -311,29 +370,41 @@ func main() {
 
 	// Delete, then update, then insert. A row the insert trigger writes can
 	// already have its later updates and deletes mirrored.
-	log.Println("creating delete trigger")
-	exec("creating the delete trigger", "create trigger "+quoteIdent(deleteTrigger)+" after delete on "+quoteIdent(tableName)+" for each row "+deleteSQL)
+	var state resumeState
+	if resuming {
+		var sourceNow string
+		if err := conn.QueryRowContext(ctx, "show create table "+quoteIdent(tableName)).Scan(new(string), &sourceNow); err != nil {
+			log.Fatalf("reading the source table: %v", err)
+		}
+		state, err = loadRunForResume(ctx, conn, resumeNames{
+			table:         tableName,
+			temp:          tempTableName,
+			run:           runTableName,
+			deleteTrigger: deleteTrigger,
+			updateTrigger: updateTrigger,
+			insertTrigger: insertTrigger,
+		}, alterQuery, sourceNow, traversalKey, map[string]string{
+			deleteTrigger: deleteSQL,
+			updateTrigger: updateSQL,
+			insertTrigger: insertSQL,
+		}, mode)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+		if *forgetReaders {
+			exec("forgetting Aurora readers", clearReadersSQL(runTableName))
+			state.readers = nil
+		}
+	} else {
+		log.Println("creating delete trigger")
+		exec("creating the delete trigger", "create trigger "+quoteIdent(deleteTrigger)+" after delete on "+quoteIdent(tableName)+" for each row "+deleteSQL)
 
-	log.Println("creating update trigger")
-	exec("creating the update trigger", "create trigger "+quoteIdent(updateTrigger)+" after update on "+quoteIdent(tableName)+" for each row "+updateSQL)
+		log.Println("creating update trigger")
+		exec("creating the update trigger", "create trigger "+quoteIdent(updateTrigger)+" after update on "+quoteIdent(tableName)+" for each row "+updateSQL)
 
-	log.Println("creating insert trigger")
-	exec("creating the insert trigger", "create trigger "+quoteIdent(insertTrigger)+" after insert on "+quoteIdent(tableName)+" for each row "+insertSQL)
-
-	p := mpb.New()
-
-	bar := p.New(count.Count,
-		mpb.BarStyle().Lbound("|").Filler("▇").Tip("▇").Padding(" ").Rbound("|"),
-		mpb.PrependDecorators(
-			decor.Name(color.HiBlueString(tableName)),
-			decor.OnComplete(decor.Percentage(decor.WC{W: 5}), color.HiMagentaString(" done!")),
-		),
-		mpb.AppendDecorators(
-			decor.CountersNoUnit("( "+color.HiCyanString("%d/%d")+", ", decor.WCSyncWidth),
-			decor.AverageSpeed(-1, " "+color.HiGreenString("%.2f/s")+" ) ", decor.WCSyncWidth),
-			decor.AverageETA(decor.ET_STYLE_MMSS),
-		),
-	)
+		log.Println("creating insert trigger")
+		exec("creating the insert trigger", "create trigger "+quoteIdent(insertTrigger)+" after insert on "+quoteIdent(tableName)+" for each row "+insertSQL)
+	}
 
 	// read committed: lock in share mode then locks only the rows it copies,
 	// not the gaps between them, so the application's inserts into a range
@@ -341,108 +412,164 @@ func main() {
 	// the temp table)
 	exec("setting the copy isolation level", "set session transaction isolation level read committed")
 
-	pkNames := columnNames(traversalKey)
-	pks := quoteIdents(pkNames)
-	after := keyAfter(pkNames)
-	atOrBefore := keyAtOrBefore(pkNames)
-	eVars := sessionVarList("@smgla_e", len(pkNames))
-	advance := cursorAssign(len(pkNames))
-	insertCols := mapping.insertList()
-	noopUpdate := quoteIdent(tempTableName) + "." + quoteIdent(mapping[0].Destination) + "=" + quoteIdent(tempTableName) + "." + quoteIdent(mapping[0].Destination)
-	selectCols := mapping.selectList()
+	if state.copyDone {
+		log.Println("the copy finished in an earlier run")
+	} else {
+		pkNames := columnNames(traversalKey)
+		pks := quoteIdents(pkNames)
+		after := keyAfter(pkNames)
+		atOrBefore := keyAtOrBefore(pkNames)
+		eVars := sessionVarList("@smgla_e", len(pkNames))
+		advance := cursorAssign(len(pkNames))
+		insertCols := mapping.insertList()
+		noopUpdate := quoteIdent(tempTableName) + "." + quoteIdent(mapping[0].Destination) + "=" + quoteIdent(tempTableName) + "." + quoteIdent(mapping[0].Destination)
+		selectCols := mapping.selectList()
 
-	const targetChunkTime = 500 * time.Millisecond
-
-	chunk := *rowBufferSize
-	first := true
-	log.Println("copying rows")
-	for {
-		exec("setting the chunk-found flag", "set @smgla_found=0")
-
-		endKey := fmt.Sprintf("select /*+ MAX_EXECUTION_TIME(2147483647) */ 1,%s into @smgla_found,%s from %s", pks, eVars, quoteIdent(tableName))
-		if !first {
-			endKey += " where " + after
+		known := make(map[string]bool, len(state.readers))
+		for _, id := range state.readers {
+			known[id] = true
 		}
-		endKey += " order by " + pks + " limit 1 offset ?"
-		exec("finding the chunk end key", endKey, chunk-1)
-
-		var found int
-		if err := conn.QueryRowContext(ctx, "select @smgla_found").Scan(&found); err != nil {
-			log.Fatalf("reading the chunk-found flag: %v", err)
+		pace := &pacer{
+			max: *maxLag,
+			off: *maxLag == 0,
+			status: func(ctx context.Context) (map[string]readerSample, bool, error) {
+				return readerStatus(ctx, conn)
+			},
+			sleep: time.Sleep,
+			logf:  log.Printf,
+			known: known,
+			save: func(ctx context.Context, ids []string) error {
+				return saveRunReaders(ctx, conn, runTableName, ids)
+			},
 		}
 
-		var where string
-		if !first {
-			where = after
+		p := mpb.New()
+		bar := p.New(count.Count,
+			mpb.BarStyle().Lbound("|").Filler("▇").Tip("▇").Padding(" ").Rbound("|"),
+			mpb.PrependDecorators(
+				decor.Name(color.HiBlueString(tableName)),
+				decor.OnComplete(decor.Percentage(decor.WC{W: 5}), color.HiMagentaString(" done!")),
+			),
+			mpb.AppendDecorators(
+				decor.CountersNoUnit("( "+color.HiCyanString("%d/%d")+", ", decor.WCSyncWidth),
+				decor.AverageSpeed(-1, " "+color.HiGreenString("%.2f/s")+" ) ", decor.WCSyncWidth),
+				decor.AverageETA(decor.ET_STYLE_MMSS),
+			),
+		)
+
+		const targetChunkTime = 500 * time.Millisecond
+
+		chunk := *rowBufferSize
+		first := true
+		if state.hasCursor {
+			exec("restoring the copy position", restoreCursorSQL(runTableName, len(pkNames)))
+			log.Println("resuming the copy after the saved position")
+			first = false
 		}
-		if found == 1 {
+		log.Println("copying rows")
+		for {
+			if err := pace.wait(ctx); err != nil {
+				log.Fatalf("pacing the copy: %v", err)
+			}
+
+			exec("setting the chunk-found flag", "set @smgla_found=0")
+
+			endKey := fmt.Sprintf("select /*+ MAX_EXECUTION_TIME(2147483647) */ 1,%s into @smgla_found,%s from %s", pks, eVars, quoteIdent(tableName))
+			if !first {
+				endKey += " where " + after
+			}
+			endKey += " order by " + pks + " limit 1 offset ?"
+			exec("finding the chunk end key", endKey, chunk-1)
+
+			var found int
+			if err := conn.QueryRowContext(ctx, "select @smgla_found").Scan(&found); err != nil {
+				log.Fatalf("reading the chunk-found flag: %v", err)
+			}
+
+			var where string
+			if !first {
+				where = after
+			}
+			if found == 1 {
+				if where != "" {
+					where += " and " + atOrBefore
+				} else {
+					where = atOrBefore
+				}
+			}
+
+			copyStmt := fmt.Sprintf("insert into %s(%s) select %s from %s", quoteIdent(tempTableName), insertCols, selectCols, quoteIdent(tableName))
 			if where != "" {
-				where += " and " + atOrBefore
+				copyStmt += " where " + where
+			}
+			// a duplicate is the row a trigger already wrote (checkUniqueCoverage
+			// makes that the only kind), and the no-op keeps it without a warning,
+			// so any warning the copy raises is a real problem
+			copyStmt += " lock in share mode on duplicate key update " + noopUpdate
+
+			exec("starting the chunk transaction", "start transaction")
+			started := time.Now()
+			res := exec("copying a chunk", copyStmt)
+			elapsed := time.Since(started)
+			// Any warning stops the copy, which is stricter than the mirror triggers.
+			// The copy governs rows that already exist; the triggers run under the
+			// global sql_mode with no IGNORE, so a write the destination rejects
+			// fails the application's statement.
+			// failOnCopyWarnings exits with log.Fatalf. The process then drops the
+			// pinned connection, and InnoDB rolls the chunk back, so a warned chunk
+			// is never checkpointed.
+			failOnCopyWarnings(ctx, conn)
+			if found == 1 {
+				exec("checkpointing the copy", checkpointSQL(runTableName, len(pkNames)))
 			} else {
-				where = atOrBefore
+				exec("marking the copy finished", markCopyDoneSQL(runTableName))
+			}
+			exec("committing the chunk", "commit")
+
+			if found == 1 {
+				bar.IncrBy(chunk)
+			} else {
+				affected, err := res.RowsAffected()
+				if err != nil {
+					log.Fatalf("reading the copied row count: %v", err)
+				}
+				bar.IncrBy(int(affected))
+				break
+			}
+
+			exec("advancing the copy cursor", "set "+advance)
+			first = false
+
+			if elapsed <= 0 {
+				elapsed = 1
+			}
+			grown := int64(chunk) * int64(targetChunkTime) / int64(elapsed)
+			if elapsed > targetChunkTime {
+				chunk = int(grown)
+				if chunk < 1 {
+					chunk = 1
+				}
+			} else {
+				add := (grown - int64(chunk)) / 10
+				if add > int64(maxChunkRows) {
+					add = int64(maxChunkRows)
+				}
+				chunk += int(add)
+				if chunk > maxChunkRows {
+					chunk = maxChunkRows
+				}
 			}
 		}
 
-		copyStmt := fmt.Sprintf("insert into %s(%s) select %s from %s", quoteIdent(tempTableName), insertCols, selectCols, quoteIdent(tableName))
-		if where != "" {
-			copyStmt += " where " + where
-		}
-		// a duplicate is the row a trigger already wrote (checkUniqueCoverage
-		// makes that the only kind), and the no-op keeps it without a warning,
-		// so any warning the copy raises is a real problem
-		copyStmt += " lock in share mode on duplicate key update " + noopUpdate
+		// and just in case the rows have changed count since our count selection,
+		// we'll just tell the progress bar that we're finished
+		bar.SetTotal(bar.Current(), true)
 
-		started := time.Now()
-		res := exec("copying a chunk", copyStmt)
-		elapsed := time.Since(started)
-		// Any warning stops the copy, which is stricter than the mirror triggers.
-		// The copy governs rows that already exist; the triggers run under the
-		// global sql_mode with no IGNORE, so a write the destination rejects
-		// fails the application's statement.
-		failOnCopyWarnings(ctx, conn)
-
-		if found == 1 {
-			bar.IncrBy(chunk)
-		} else {
-			affected, err := res.RowsAffected()
-			if err != nil {
-				log.Fatalf("reading the copied row count: %v", err)
-			}
-			bar.IncrBy(int(affected))
-			break
-		}
-
-		exec("advancing the copy cursor", "set "+advance)
-		first = false
-
-		if elapsed <= 0 {
-			elapsed = 1
-		}
-		grown := int64(chunk) * int64(targetChunkTime) / int64(elapsed)
-		if elapsed > targetChunkTime {
-			chunk = int(grown)
-			if chunk < 1 {
-				chunk = 1
-			}
-		} else {
-			add := (grown - int64(chunk)) / 10
-			if add > int64(maxChunkRows) {
-				add = int64(maxChunkRows)
-			}
-			chunk += int(add)
-			if chunk > maxChunkRows {
-				chunk = maxChunkRows
-			}
-		}
+		p.Wait()
 	}
 
-	// and just in case the rows have changed count since our count selection,
-	// we'll just tell the progress bar that we're finished
-	bar.SetTotal(bar.Current(), true)
-
-	p.Wait()
-
 	if !yesNo("do the drop/swap?") {
+		log.Println("left the temp table, mirror triggers and run record in place; rerun to continue")
 		os.Exit(0)
 	}
 
@@ -482,6 +609,13 @@ func main() {
 
 	for _, step := range steps {
 		execRestoreStep(ctx, conn, step, tableName, tempTableName, recoveryPath)
+	}
+
+	// The swap is done. A failure here is leftover bookkeeping, not a failed alter.
+	log.Println("dropping the run table")
+	if _, err := conn.ExecContext(ctx, "drop table "+quoteIdent(runTableName)); err != nil {
+		log.Printf("dropping the run table %s: %v", runTableName, err)
+		os.Exit(0)
 	}
 
 	log.Println("finished altering", tableName, "in", time.Since(start))
