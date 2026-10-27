@@ -175,6 +175,17 @@ func main() {
 	if len(runTableName) > 64 {
 		log.Fatalf("cannot copy %s: run table name %q is %d characters; MySQL identifiers are at most 64", tableName, runTableName, len(runTableName))
 	}
+	oldTableName := tableName + *tempTableSuffix + "old_"
+	if len(oldTableName) > 64 {
+		log.Fatalf("cannot copy %s: old table name %q is %d characters; MySQL identifiers are at most 64", tableName, oldTableName, len(oldTableName))
+	}
+	var oldExists int
+	if err := conn.QueryRowContext(ctx, "select count(*) from `information_schema`.`tables` where `TABLE_SCHEMA`=database() and `TABLE_NAME`=?", oldTableName).Scan(&oldExists); err != nil {
+		log.Fatalf("cannot copy %s: %v", tableName, err)
+	}
+	if oldExists != 0 {
+		log.Fatalf("cannot copy %s: %s exists; a previous swap left it, or another table has that name. Check it and drop it, then rerun.", tableName, oldTableName)
+	}
 
 	insertTrigger := tableName + "_after_insert" + *tempTableSuffix
 	updateTrigger := tableName + "_after_update" + *tempTableSuffix
@@ -589,33 +600,54 @@ func main() {
 		log.Fatalf("cannot copy %s: the source's triggers or foreign keys changed during the copy; rerun the tool", tableName)
 	}
 
+	var version string
+	if err := conn.QueryRowContext(ctx, "select version()").Scan(&version); err != nil {
+		log.Fatalf("reading the server version: %v", err)
+	}
+	strategy, reason := chooseCutOver(plan, version)
+	if strategy == cutOverAtomic {
+		log.Println("swapping under lock tables: the table has no foreign keys")
+	} else {
+		log.Printf("swapping by drop then rename: %s", reason)
+	}
+
 	var sessionSQLMode, sessionCollation, charset, database string
 	if err := conn.QueryRowContext(ctx, "select @@session.sql_mode, @@session.collation_connection, @@character_set_client, database()").
 		Scan(&sessionSQLMode, &sessionCollation, &charset, &database); err != nil {
 		log.Fatalf("reading session sql_mode, collation, character set, and database: %v", err)
 	}
-	steps := plan.steps(tableName, tempTableName, sessionSQLMode, sessionCollation)
 	recoveryPath := fmt.Sprintf("smgla-recovery-%s-%d.sql", tableName, time.Now().Unix())
-	if err := os.WriteFile(recoveryPath, []byte(recoverySQL(database, charset, steps)), 0o644); err != nil {
-		log.Fatalf("writing recovery file: %v", err)
-	}
-	log.Printf("wrote recovery file %s", recoveryPath)
 
-	log.Println("disabling foreign key checks for our connection")
-	exec("disabling foreign key checks", "set foreign_key_checks=0")
+	if strategy == cutOverDropFirst {
+		steps := plan.steps(tableName, tempTableName, sessionSQLMode, sessionCollation)
+		if err := os.WriteFile(recoveryPath, []byte(recoverySQL(database, charset, steps, true)), 0o644); err != nil {
+			log.Fatalf("writing recovery file: %v", err)
+		}
+		log.Printf("wrote recovery file %s", recoveryPath)
 
-	log.Println("dropping the original table")
-	exec("dropping the original table", "drop table if exists "+quoteIdent(tableName))
+		log.Println("disabling foreign key checks for our connection")
+		exec("disabling foreign key checks", "set foreign_key_checks=0")
 
-	for _, step := range steps {
-		execRestoreStep(ctx, conn, step, tableName, tempTableName, recoveryPath)
-	}
+		log.Println("dropping the original table")
+		exec("dropping the original table", "drop table if exists "+quoteIdent(tableName))
 
-	// The swap is done. A failure here is leftover bookkeeping, not a failed alter.
-	log.Println("dropping the run table")
-	if _, err := conn.ExecContext(ctx, "drop table "+quoteIdent(runTableName)); err != nil {
-		log.Printf("dropping the run table %s: %v", runTableName, err)
-		os.Exit(0)
+		for _, step := range steps {
+			execRestoreStep(ctx, conn, step, tableName, tempTableName, recoveryPath)
+		}
+
+		// The swap is done. A failure here is leftover bookkeeping, not a failed alter.
+		log.Println("dropping the run table")
+		if _, err := conn.ExecContext(ctx, "drop table "+quoteIdent(runTableName)); err != nil {
+			log.Printf("dropping the run table %s: %v", runTableName, err)
+			os.Exit(0)
+		}
+	} else {
+		steps := plan.atomicSteps(tableName, tempTableName, oldTableName, runTableName, sessionSQLMode, sessionCollation)
+		if err := os.WriteFile(recoveryPath, []byte(recoverySQL(database, charset, plan.atomicRecoverySteps(sessionSQLMode, sessionCollation), false)), 0o644); err != nil {
+			log.Fatalf("writing recovery file: %v", err)
+		}
+		log.Printf("wrote recovery file %s", recoveryPath)
+		swapUnderLock(ctx, conn, plan, steps, tableName, tempTableName, oldTableName, runTableName, sessionSQLMode, sessionCollation, recoveryPath)
 	}
 
 	log.Println("finished altering", tableName, "in", time.Since(start))
