@@ -3,7 +3,7 @@ module github.com/StirlingMarketingGroup/smg-live-alter/v2
 go 1.26.0
 
 require (
-	github.com/StirlingMarketingGroup/cool-mysql v0.0.47
+	github.com/StirlingMarketingGroup/cool-mysql v0.0.48
 	github.com/fatih/color v1.19.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/posener/cmd v1.3.4
