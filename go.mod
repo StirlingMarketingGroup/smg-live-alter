@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/StirlingMarketingGroup/cool-mysql v0.0.49
 	github.com/fatih/color v1.19.0
-	github.com/go-sql-driver/mysql v1.10.1
+	github.com/go-sql-driver/mysql v1.10.2
 	github.com/posener/cmd v1.3.4
 	github.com/vbauerster/mpb/v8 v8.16.3
 	gopkg.in/yaml.v2 v2.4.0
